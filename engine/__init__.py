@@ -1,0 +1,2 @@
+"""Photo Curator core services."""
+
