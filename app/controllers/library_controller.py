@@ -121,12 +121,13 @@ class LibraryController:
         complete_scan: bool = True,
     ) -> list[PhotoRecord]:
         seen: set[str] = set()
-        for record in records:
-            seen.add(record.path)
-            self.repository.upsert_by_path(record)
-        if complete_scan:
-            self.repository.mark_missing_except(seen, [str(Path(root).resolve()) for root in roots])
-        self._assign_duplicate_groups()
+        with self.repository.batch():
+            for record in records:
+                seen.add(record.path)
+                self.repository.upsert_by_path(record)
+            if complete_scan:
+                self.repository.mark_missing_except(seen, [str(root) for root in roots])
+            self._assign_duplicate_groups()
         return self.load_records()
 
     def _assign_duplicate_groups(self) -> None:

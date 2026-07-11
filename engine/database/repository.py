@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .models import PhotoRecord
@@ -13,6 +16,7 @@ class PhotoRepository:
         self.connection = sqlite3.connect(str(database))
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        self._batch_depth = 0
         self._create_schema()
 
     _COLUMNS = (
@@ -57,7 +61,7 @@ class PhotoRepository:
             f"INSERT INTO photos({', '.join(self._COLUMNS)}) VALUES ({placeholders})",
             tuple(getattr(photo, column) for column in self._COLUMNS),
         )
-        self.connection.commit()
+        self._commit_unless_batching()
         stored = self.get(cursor.lastrowid)
         assert stored is not None
         return stored
@@ -73,7 +77,7 @@ class PhotoRepository:
         if cursor.rowcount == 0:
             self.connection.rollback()
             raise KeyError(f"Photo record {photo.id} does not exist")
-        self.connection.commit()
+        self._commit_unless_batching()
         stored = self.get(photo.id)
         assert stored is not None
         return stored
@@ -92,8 +96,31 @@ class PhotoRepository:
 
     def delete(self, photo_id: int) -> bool:
         cursor = self.connection.execute("DELETE FROM photos WHERE id = ?", (photo_id,))
-        self.connection.commit()
+        self._commit_unless_batching()
         return cursor.rowcount > 0
+
+    def _commit_unless_batching(self) -> None:
+        if self._batch_depth == 0:
+            self.connection.commit()
+
+    @contextmanager
+    def batch(self) -> Iterator[None]:
+        """Defer write commits and atomically commit the outermost batch."""
+        self._batch_depth += 1
+        try:
+            yield
+        except BaseException:
+            self.connection.rollback()
+            raise
+        else:
+            if self._batch_depth == 1:
+                try:
+                    self.connection.commit()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+        finally:
+            self._batch_depth -= 1
 
     def upsert_by_path(self, photo: PhotoRecord) -> PhotoRecord:
         existing = self.get_by_path(photo.path)
@@ -103,8 +130,10 @@ class PhotoRepository:
         return self.update(photo)
 
     def mark_missing_except(self, existing_paths: set[str], roots: list[str]) -> None:
+        normalized_roots = [_normalized_absolute(Path(root).resolve()) for root in roots]
         for photo in self.list_all():
-            belongs = any(_is_beneath(photo.path, root) for root in roots)
+            normalized_path = _normalized_absolute(photo.path)
+            belongs = any(_is_beneath(normalized_path, root) for root in normalized_roots)
             if belongs and photo.path not in existing_paths and photo.status != "missing":
                 photo.status = "missing"
                 self.update(photo)
@@ -130,9 +159,12 @@ class PhotoRepository:
         self.close()
 
 
+def _normalized_absolute(path: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(os.fspath(path))))
+
+
 def _is_beneath(path: str, root: str) -> bool:
     try:
-        Path(path).resolve().relative_to(Path(root).resolve())
-        return True
+        return os.path.commonpath((path, root)) == root
     except ValueError:
         return False
