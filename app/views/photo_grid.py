@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import QAbstractItemView, QListView, QListWidget, QListWidgetItem, QRubberBand
 
 from app.widgets.photo_tile import PhotoTile
@@ -10,6 +10,7 @@ from engine.database.models import PhotoRecord
 
 
 THUMBNAIL_SIZES = {"Small": 170, "Medium": 240, "Large": 300}
+TILE_CREATION_CHUNK_SIZE = 200
 
 
 class PhotoGrid(QListWidget):
@@ -40,6 +41,14 @@ class PhotoGrid(QListWidget):
         self._rubber_origin = QPoint()
         self._rubber_modifiers = Qt.KeyboardModifier.NoModifier
         self._rubber_base: set[int] = set()
+        self._items_by_id: dict[int, QListWidgetItem] = {}
+        self._records_by_id: dict[int, PhotoRecord] = {}
+        self._pending_tile_ids: list[int] = []
+        self._pending_thumbnail_paths: dict[int, str] = {}
+        self._rename_selected_ids: set[int] = set()
+        self._tile_timer = QTimer(self)
+        self._tile_timer.setInterval(0)
+        self._tile_timer.timeout.connect(self._materialize_next_chunk)
         self._apply_size()
 
     def set_thumbnail_size(self, preset: str) -> None:
@@ -67,14 +76,45 @@ class PhotoGrid(QListWidget):
     def populate(self, records: list[PhotoRecord], selected_ids: set[int]) -> None:
         previous_ui_selection = self.selected_photo_ids()
         self.clear()
+        self._rename_selected_ids = set(selected_ids)
         for record in records:
             if record.id is None:
                 continue
+            photo_id = int(record.id)
             item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, record.id)
+            item.setData(Qt.ItemDataRole.UserRole, photo_id)
             item.setSizeHint(self.gridSize())
             self.addItem(item)
-            tile = PhotoTile(record, record.id in selected_ids, self.thumbnail_width)
+            self._items_by_id[photo_id] = item
+            self._records_by_id[photo_id] = record
+            self._pending_tile_ids.append(photo_id)
+            if photo_id in previous_ui_selection:
+                item.setSelected(True)
+        self._materialize_next_chunk()
+        if self._pending_tile_ids:
+            self._tile_timer.start()
+        self._sync_selection_style()
+
+    def clear(self) -> None:
+        """Clear items and cancel tile work belonging to the old population."""
+        if hasattr(self, "_tile_timer"):
+            self._tile_timer.stop()
+            self._items_by_id.clear()
+            self._records_by_id.clear()
+            self._pending_tile_ids.clear()
+            self._pending_thumbnail_paths.clear()
+            self._rename_selected_ids.clear()
+        super().clear()
+
+    def _materialize_next_chunk(self) -> None:
+        chunk = self._pending_tile_ids[:TILE_CREATION_CHUNK_SIZE]
+        del self._pending_tile_ids[: len(chunk)]
+        for photo_id in chunk:
+            item = self._items_by_id.get(photo_id)
+            record = self._records_by_id.get(photo_id)
+            if item is None or record is None:
+                continue
+            tile = PhotoTile(record, photo_id in self._rename_selected_ids, self.thumbnail_width)
             tile.rename_toggled.connect(self.rename_toggled)
             tile.clicked.connect(self._tile_clicked)
             tile.activated.connect(self.photo_activated)
@@ -83,22 +123,23 @@ class PhotoGrid(QListWidget):
             tile.drag_moved.connect(self._move_tile_rubber_band)
             tile.drag_finished.connect(self._finish_tile_rubber_band)
             self.setItemWidget(item, tile)
-            if record.id in previous_ui_selection:
-                item.setSelected(True)
-        self._sync_selection_style()
+            tile.set_ui_selected(item.isSelected())
+            thumbnail_path = self._pending_thumbnail_paths.pop(photo_id, None)
+            if thumbnail_path is not None:
+                tile.set_thumbnail(thumbnail_path)
+        if not self._pending_tile_ids:
+            self._tile_timer.stop()
 
     def set_thumbnail(self, photo_id: int, path: str) -> None:
         item = self.item_for_id(photo_id)
         tile = self.itemWidget(item) if item else None
         if isinstance(tile, PhotoTile):
             tile.set_thumbnail(path)
+        elif item is not None:
+            self._pending_thumbnail_paths[photo_id] = path
 
     def item_for_id(self, photo_id: int) -> QListWidgetItem | None:
-        for index in range(self.count()):
-            item = self.item(index)
-            if int(item.data(Qt.ItemDataRole.UserRole)) == photo_id:
-                return item
-        return None
+        return self._items_by_id.get(photo_id)
 
     def _sync_selection_style(self) -> None:
         for index in range(self.count()):
