@@ -15,8 +15,13 @@ from engine.scanner.photo_scanner import scan_photos
 
 
 class ScanJob:
-    def __init__(self, roots: Iterable[str | Path]) -> None:
+    def __init__(
+        self,
+        roots: Iterable[str | Path],
+        known: dict[str, PhotoRecord] | None = None,
+    ) -> None:
         self.roots = [Path(root) for root in roots]
+        self.known = known or {}
         self._cancelled = Event()
 
     def cancel(self) -> None:
@@ -36,13 +41,51 @@ class ScanJob:
             if progress:
                 progress(index, total, str(path))
             try:
-                record = self._read_record(path)
+                record = self._reuse_record(path) or self._read_record(path)
             except (OSError, ValueError) as exc:
                 if error:
                     error(str(path), str(exc))
                 continue
             records.append(record)
         return records
+
+    def _reuse_record(self, path: Path) -> PhotoRecord | None:
+        known = self.known.get(str(path))
+        if (
+            known is None
+            or known.modified_at is None
+            or not known.sha256
+            or any(
+                value is None
+                for value in (
+                    known.captured_at,
+                    known.width,
+                    known.height,
+                    known.proposed_name,
+                    known.date_source,
+                )
+            )
+        ):
+            return None
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        if stat.st_size != known.size or stat.st_mtime != known.modified_at:
+            return None
+        return PhotoRecord(
+            path=str(path),
+            sha256=known.sha256,
+            size=known.size,
+            captured_at=known.captured_at,
+            width=known.width,
+            height=known.height,
+            modified_at=known.modified_at,
+            proposed_name=known.proposed_name,
+            date_source=known.date_source,
+            camera_make=known.camera_make,
+            camera_model=known.camera_model,
+        )
 
     @staticmethod
     def _read_record(path: Path) -> PhotoRecord:
@@ -78,9 +121,13 @@ try:
         file_error = Signal(str, str)
         finished = Signal(list, bool)
 
-        def __init__(self, roots: Iterable[str | Path]) -> None:
+        def __init__(
+            self,
+            roots: Iterable[str | Path],
+            known: dict[str, PhotoRecord] | None = None,
+        ) -> None:
             super().__init__()
-            self.job = ScanJob(roots)
+            self.job = ScanJob(roots, known)
 
         @Slot()
         def run(self) -> None:
