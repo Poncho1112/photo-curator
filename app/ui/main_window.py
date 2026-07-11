@@ -17,6 +17,7 @@ from app.views.rename_review import RenameReviewDialog
 from app.widgets.progress_panel import ProgressPanel
 from app.workers.scan_worker import ScanWorker
 from app.workers.thumbnail_worker import ThumbnailWorker
+from engine.thumbnails.thumbnail_service import enforce_cache_limit
 
 
 log = logging.getLogger(__name__)
@@ -349,6 +350,16 @@ class MainWindow(QMainWindow):
                 requests.append((record.id, record.path, str(target)))
         if not requests:
             return
+        viewport_rect = self.grid.viewport().rect()
+        visible_ids = set()
+        for index in range(self.grid.count()):
+            item = self.grid.item(index)
+            if self.grid.visualItemRect(item).intersects(viewport_rect):
+                visible_ids.add(int(item.data(Qt.ItemDataRole.UserRole)))
+        requests = (
+            [request for request in requests if request[0] in visible_ids]
+            + [request for request in requests if request[0] not in visible_ids]
+        )
         self._thumbnail_refresh_pending = False
         self.thumbnail_thread = QThread(self)
         self.thumbnail_worker = ThumbnailWorker(requests)
@@ -370,6 +381,10 @@ class MainWindow(QMainWindow):
             self.thumbnail_thread.deleteLater()
         self.thumbnail_worker = None
         self.thumbnail_thread = None
+        try:
+            enforce_cache_limit(self.controller.paths.thumbnails)
+        except OSError:
+            log.exception("Could not enforce thumbnail cache limit")
         if self._thumbnail_refresh_pending and not self._closing:
             self._thumbnail_refresh_pending = False
             self._load_thumbnails(getattr(self, "_visible_records", ()))
