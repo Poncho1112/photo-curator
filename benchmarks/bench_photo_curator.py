@@ -97,7 +97,8 @@ def run_benchmark(count: int, work_root: Path) -> dict[str, object]:
             raise RuntimeError(f"Index contains {len(indexed_records)} records; expected {count}")
 
         rescan_started = time.perf_counter()
-        unchanged_records = ScanJob([library_root]).run()
+        known = {record.path: record for record in controller.records}
+        unchanged_records = ScanJob([library_root], known).run()
         if len(unchanged_records) != count:
             raise RuntimeError(f"Rescan returned {len(unchanged_records)} records; expected {count}")
         controller.index_records(unchanged_records, [library_root])

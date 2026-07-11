@@ -252,7 +252,8 @@ class MainWindow(QMainWindow):
             return
         self.scan_errors.clear()
         self.scan_thread = QThread(self)
-        self.scan_worker = ScanWorker(roots)
+        known = {record.path: record for record in self.controller.records}
+        self.scan_worker = ScanWorker(roots, known)
         self.scan_worker.moveToThread(self.scan_thread)
         self.scan_thread.started.connect(self.scan_worker.run)
         self.scan_worker.progress.connect(self.progress.update_progress)
