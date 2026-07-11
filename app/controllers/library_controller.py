@@ -91,6 +91,28 @@ class LibraryController:
         else:
             self.rename_selection.discard(photo_id)
 
+    def mark_for_rename(self, photo_ids: Iterable[int]) -> None:
+        valid = {record.id for record in self.records if record.id is not None}
+        self.rename_selection.update(set(photo_ids) & valid)
+
+    def remove_from_rename(self, photo_ids: Iterable[int]) -> None:
+        self.rename_selection.difference_update(photo_ids)
+
+    def toggle_rename_selection(self, photo_ids: Iterable[int]) -> None:
+        for photo_id in photo_ids:
+            self.set_selected_for_rename(photo_id, photo_id not in self.rename_selection)
+
+    def remove_missing_records(self, photo_ids: Iterable[int]) -> int:
+        removed = 0
+        by_id = {record.id: record for record in self.records}
+        for photo_id in set(photo_ids):
+            record = by_id.get(photo_id)
+            if record and (record.status == "missing" or not Path(record.path).is_file()):
+                removed += int(self.repository.delete(photo_id))
+                self.rename_selection.discard(photo_id)
+        self.load_records()
+        return removed
+
     def index_records(
         self,
         records: Iterable[PhotoRecord],

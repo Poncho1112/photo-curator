@@ -90,6 +90,11 @@ class PhotoRepository:
         rows = self.connection.execute("SELECT * FROM photos ORDER BY id").fetchall()
         return [PhotoRecord(**dict(row)) for row in rows]
 
+    def delete(self, photo_id: int) -> bool:
+        cursor = self.connection.execute("DELETE FROM photos WHERE id = ?", (photo_id,))
+        self.connection.commit()
+        return cursor.rowcount > 0
+
     def upsert_by_path(self, photo: PhotoRecord) -> PhotoRecord:
         existing = self.get_by_path(photo.path)
         if existing is None:

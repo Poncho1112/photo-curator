@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImageReader, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
@@ -16,6 +16,8 @@ from engine.database.models import PhotoRecord
 
 
 class PhotoPreview(QWidget):
+    rename_toggled = Signal(int, bool)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.record: PhotoRecord | None = None
@@ -29,17 +31,21 @@ class PhotoPreview(QWidget):
         self.metadata = MetadataPanel()
         self.open_button = QPushButton("Open Photo")
         self.explorer_button = QPushButton("Show in Explorer")
+        self.rename_button = QPushButton("Mark for Rename")
         buttons = QHBoxLayout()
         buttons.addWidget(self.open_button)
         buttons.addWidget(self.explorer_button)
+        buttons.addWidget(self.rename_button)
         layout = QVBoxLayout(self)
         layout.addWidget(scroll, 1)
         layout.addWidget(self.metadata)
         layout.addLayout(buttons)
         self.open_button.clicked.connect(self.open_photo)
         self.explorer_button.clicked.connect(self.show_in_explorer)
+        self.rename_button.clicked.connect(self._toggle_rename)
+        self._rename_selected = False
 
-    def show_record(self, record: PhotoRecord) -> None:
+    def show_record(self, record: PhotoRecord, selected_for_rename: bool = False) -> None:
         self.record = record
         path = Path(record.path)
         if path.is_file():
@@ -52,7 +58,8 @@ class PhotoPreview(QWidget):
             self.image.setText("File is missing")
         camera = " ".join(filter(None, (record.camera_make, record.camera_model)))
         self.metadata.set_values({
-            "Filename": path.name, "Path": record.path, "Proposed": record.proposed_name or path.name,
+            "Filename": path.name, "Path": record.path, "Folder": str(path.parent),
+            "Proposed": record.proposed_name or path.name,
             "Capture date": record.captured_at or "", "Date source": record.date_source or "", "Camera": camera,
             "Dimensions": f"{record.width} × {record.height}" if record.width and record.height else "",
             "File size": _format_size(record.size), "SHA-256": record.sha256[:12],
@@ -60,6 +67,16 @@ class PhotoPreview(QWidget):
         })
         self.open_button.setEnabled(path.is_file())
         self.explorer_button.setEnabled(path.parent.is_dir())
+        self.set_rename_selected(selected_for_rename)
+        self.rename_button.setEnabled(record.id is not None)
+
+    def set_rename_selected(self, selected: bool) -> None:
+        self._rename_selected = selected
+        self.rename_button.setText("Remove from Rename" if selected else "Mark for Rename")
+
+    def _toggle_rename(self) -> None:
+        if self.record and self.record.id is not None:
+            self.rename_toggled.emit(self.record.id, not self._rename_selected)
 
     def open_photo(self) -> None:
         if self.record and Path(self.record.path).is_file():

@@ -102,3 +102,30 @@ def test_cancelled_index_does_not_mark_unprocessed_records_missing(tmp_path):
     controller.index_records([PhotoRecord(str(first), "a" * 64, 1)], [root], complete_scan=False)
     assert controller.repository.get_by_path(second).status == "indexed"
     controller.repository.close()
+
+
+def test_mark_remove_and_toggle_rename_selection(tmp_path):
+    controller = make_controller(tmp_path, [PhotoRecord("one.jpg", "a" * 64, 1), PhotoRecord("two.jpg", "b" * 64, 1)])
+    first, second = (record.id for record in controller.records)
+    controller.mark_for_rename([first, second])
+    assert controller.rename_selection == {first, second}
+    controller.remove_from_rename([first])
+    assert controller.rename_selection == {second}
+    controller.toggle_rename_selection([first, second])
+    assert controller.rename_selection == {first}
+    controller.repository.close()
+
+
+def test_remove_missing_record_only_removes_catalog_row(tmp_path):
+    present = tmp_path / "present.jpg"
+    present.write_bytes(b"photo")
+    controller = make_controller(tmp_path, [
+        PhotoRecord(str(present), "a" * 64, 5),
+        PhotoRecord(str(tmp_path / "missing.jpg"), "b" * 64, 1, status="missing"),
+    ])
+    present_id, missing_id = (record.id for record in controller.records)
+    assert controller.remove_missing_records([present_id, missing_id]) == 1
+    assert controller.repository.get(present_id) is not None
+    assert controller.repository.get(missing_id) is None
+    assert present.read_bytes() == b"photo"
+    controller.repository.close()

@@ -25,7 +25,7 @@ PySide6 MainWindow
 - `app/controllers/library_controller.py` owns filter state, explicit rename selections, indexing, duplicate groups, manifests, rename coordination, and undo coordination.
 - `app/ui/main_window.py` coordinates Qt actions and background threads.
 - `app/views/` contains folder/filter, thumbnail, preview, and rename-review views.
-- `app/widgets/` contains reusable tile, metadata, and progress components.
+- `app/widgets/` contains reusable checkbox-based photo tiles, metadata, and progress components.
 - `app/workers/` contains cancelable scan work and thumbnail generation adapters.
 
 ## Core services
@@ -54,7 +54,21 @@ Scanning and thumbnail generation run on `QThread` workers. Cancellation sets a 
 - The core rename and undo services repeat overwrite checks immediately before mutation.
 - Technical errors go to the application log; the UI shows concise messages.
 
+## Selection model
+
+The thumbnail browser deliberately maintains two independent concepts:
+
+- Qt extended selection controls focus, Ctrl/Shift selection, and rubber-band selection.
+- `LibraryController.rename_selection` stores explicit checkbox choices by database ID and survives filtering.
+
+Double-click activates preview. Space maps the current ordinary selection into checkbox state. Rebuilding the visible filtered grid restores both applicable states.
+
+The selection-aware context menu targets the entire ordinary selection when the clicked tile is already selected; otherwise it first replaces the ordinary selection with that tile. Removing a missing record deletes only its SQLite catalog row and never touches the filesystem.
+
+## UI preferences
+
+`QSettings` persists the System/Light/Dark theme and Small/Medium/Large thumbnail size. System theme retains the platform palette, while Light and Dark apply coherent application styles covering menus, toolbars, tiles, metadata groups, dialogs, and the status bar.
+
 ## Tests
 
 Core tests cover naming, SQLite, duplicate hashing, rename, and undo. Milestone tests cover controller loading and filtering, selection persistence, conflict review, manifests, missing records, scan cancellation/error isolation, and offscreen preview integration.
-

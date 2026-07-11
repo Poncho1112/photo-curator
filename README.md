@@ -38,6 +38,33 @@ On Windows, `run_photo_curator.bat` activates the repository virtual environment
 
 Photo Curator never overwrites an existing destination. Failed or missing files remain indexed for review.
 
+## Browsing and selection
+
+- Double-click a thumbnail to open its larger preview.
+- Click, Ctrl-click, Shift-click, or drag across empty grid space to create an ordinary UI selection.
+- Use the visible **Rename** checkbox—or press Space—to add the ordinary selection to the separate rename plan.
+- Right-click a tile to preview, open/reveal it, mark/remove/toggle rename selection, copy its path or filename, isolate its exact-duplicate group, or remove a missing catalog record.
+- Choose Small, Medium, or Large thumbnails from the toolbar.
+- Choose System, Light, or Dark under **View → Theme**. Theme and thumbnail size persist between sessions through `QSettings`.
+- The status bar separately reports visible photos, ordinary selection, rename marks, duplicates, and missing records.
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| Ctrl+O | Add folder |
+| F5 | Start scan |
+| Ctrl+F | Focus search |
+| Space | Toggle rename checkbox for selected tiles |
+| Enter | Preview focused tile |
+| Ctrl+A | Select all visible tiles |
+| Ctrl+R | Review and rename selected photos |
+| Ctrl+E | Export manifest |
+| Ctrl+Z | Undo latest batch |
+| Ctrl+Shift+R | Remove selected tiles from the rename set |
+| Esc | Cancel an active scan, otherwise clear ordinary selection |
+| Delete | No action; Photo Curator never deletes photos |
+
 ## Tests
 
 ```powershell
@@ -65,4 +92,3 @@ The directory contains `catalog.sqlite3`, `thumbnails/`, `manifests/`, `undo/`, 
 - Renames stay in the original folder; Photo Curator performs no automatic moves.
 
 See [[docs/Architecture|Architecture]] for component details.
-
