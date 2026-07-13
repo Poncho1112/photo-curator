@@ -78,7 +78,7 @@ def qt_app():
 
 def test_visible_items_are_thumbnail_request_prefix(tmp_path, qt_app, monkeypatch):
     records = [
-        PhotoRecord(str(tmp_path / f"photo-{index}.jpg"), f"{index:064x}", 5, id=index + 1, status="missing")
+        PhotoRecord(str(tmp_path / f"photo-{index}.jpg"), f"{index:064x}", 5, id=index + 1, status="indexed")
         for index in range(36)
     ]
     paths = AppPaths.from_root(tmp_path / "app-data")
@@ -99,6 +99,17 @@ def test_visible_items_are_thumbnail_request_prefix(tmp_path, qt_app, monkeypatc
         for index in range(window.grid.count())
         if window.grid.visualItemRect(window.grid.item(index)).intersects(viewport_rect)
     ]
+
+    # The initial show() may still have a thumbnail batch in flight; drain it so
+    # the assertion targets our explicit _load_thumbnails call rather than
+    # tripping the "batch already running" guard (which would capture nothing).
+    if window.thumbnail_thread is not None:
+        window.thumbnail_thread.quit()
+        window.thumbnail_thread.wait()
+    window.thumbnail_thread = None
+    window.thumbnail_worker = None
+    window._thumbnail_refresh_pending = False
+
     captured = []
 
     def capturing_worker(requests):
