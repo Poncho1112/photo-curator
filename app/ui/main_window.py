@@ -314,14 +314,15 @@ class MainWindow(QMainWindow):
         records = self.controller.filtered_records()
         self._visible_records = records
         self.grid.populate(records, self.controller.rename_selection)
-        self.folder_panel.refresh_counts(self.controller.records)
+        if load:
+            self.folder_panel.refresh_counts(self.controller.records)
         self.update_chrome()
         self._load_thumbnails(records)
 
     def update_chrome(self) -> None:
         records = self._visible_records if hasattr(self, "_visible_records") else self.controller.filtered_records()
         duplicates = sum(bool(record.duplicate_group) for record in records)
-        missing = sum(record.status == "missing" or not Path(record.path).is_file() for record in records)
+        missing = sum(record.status == "missing" for record in records)
         ui_selected = len(self.grid.selected_photo_ids())
         rename_count = len(self.controller.rename_selection)
         self.summary.setText(
@@ -345,17 +346,17 @@ class MainWindow(QMainWindow):
             return
         requests = []
         for record in records:
-            if record.id is not None and Path(record.path).is_file():
+            if record.id is not None and record.status != "missing":
                 target = self.controller.paths.thumbnails / f"{record.sha256}.jpg"
                 requests.append((record.id, record.path, str(target)))
         if not requests:
             return
-        viewport_rect = self.grid.viewport().rect()
-        visible_ids = set()
-        for index in range(self.grid.count()):
-            item = self.grid.item(index)
-            if self.grid.visualItemRect(item).intersects(viewport_rect):
-                visible_ids.add(int(item.data(Qt.ItemDataRole.UserRole)))
+        # A filtered population starts at the top. Prioritize enough items to
+        # fill several screens without calculating every item's visual rect.
+        visible_ids = {
+            int(self.grid.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(min(self.grid.count(), 96))
+        }
         requests = (
             [request for request in requests if request[0] in visible_ids]
             + [request for request in requests if request[0] not in visible_ids]

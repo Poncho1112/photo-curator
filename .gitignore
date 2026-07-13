@@ -1,4 +1,6 @@
 .venv/
+.sandbox-venv/
+.python314/
 .pytest_cache/
 __pycache__/
 *.py[cod]

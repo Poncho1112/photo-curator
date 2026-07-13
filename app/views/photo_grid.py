@@ -10,7 +10,7 @@ from engine.database.models import PhotoRecord
 
 
 THUMBNAIL_SIZES = {"Small": 170, "Medium": 240, "Large": 300}
-TILE_CREATION_CHUNK_SIZE = 200
+TILE_CREATION_CHUNK_SIZE = 32
 
 
 class PhotoGrid(QListWidget):
@@ -46,6 +46,7 @@ class PhotoGrid(QListWidget):
         self._pending_tile_ids: list[int] = []
         self._pending_thumbnail_paths: dict[int, str] = {}
         self._rename_selected_ids: set[int] = set()
+        self._styled_selected_ids: set[int] = set()
         self._tile_timer = QTimer(self)
         self._tile_timer.setInterval(0)
         self._tile_timer.timeout.connect(self._materialize_next_chunk)
@@ -75,21 +76,27 @@ class PhotoGrid(QListWidget):
 
     def populate(self, records: list[PhotoRecord], selected_ids: set[int]) -> None:
         previous_ui_selection = self.selected_photo_ids()
-        self.clear()
-        self._rename_selected_ids = set(selected_ids)
-        for record in records:
-            if record.id is None:
-                continue
-            photo_id = int(record.id)
-            item = QListWidgetItem()
-            item.setData(Qt.ItemDataRole.UserRole, photo_id)
-            item.setSizeHint(self.gridSize())
-            self.addItem(item)
-            self._items_by_id[photo_id] = item
-            self._records_by_id[photo_id] = record
-            self._pending_tile_ids.append(photo_id)
-            if photo_id in previous_ui_selection:
-                item.setSelected(True)
+        self.setUpdatesEnabled(False)
+        self.blockSignals(True)
+        try:
+            self.clear()
+            self._rename_selected_ids = set(selected_ids)
+            for record in records:
+                if record.id is None:
+                    continue
+                photo_id = int(record.id)
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, photo_id)
+                item.setSizeHint(self.gridSize())
+                self.addItem(item)
+                self._items_by_id[photo_id] = item
+                self._records_by_id[photo_id] = record
+                self._pending_tile_ids.append(photo_id)
+                if photo_id in previous_ui_selection:
+                    item.setSelected(True)
+        finally:
+            self.blockSignals(False)
+            self.setUpdatesEnabled(True)
         self._materialize_next_chunk()
         if self._pending_tile_ids:
             self._tile_timer.start()
@@ -104,6 +111,7 @@ class PhotoGrid(QListWidget):
             self._pending_tile_ids.clear()
             self._pending_thumbnail_paths.clear()
             self._rename_selected_ids.clear()
+            self._styled_selected_ids.clear()
         super().clear()
 
     def _materialize_next_chunk(self) -> None:
@@ -142,11 +150,16 @@ class PhotoGrid(QListWidget):
         return self._items_by_id.get(photo_id)
 
     def _sync_selection_style(self) -> None:
-        for index in range(self.count()):
-            item = self.item(index)
+        selected_ids = self.selected_photo_ids()
+        changed_ids = selected_ids.symmetric_difference(self._styled_selected_ids)
+        for photo_id in changed_ids:
+            item = self._items_by_id.get(photo_id)
+            if item is None:
+                continue
             tile = self.itemWidget(item)
             if isinstance(tile, PhotoTile):
                 tile.set_ui_selected(item.isSelected())
+        self._styled_selected_ids = selected_ids
 
     def _activate_item(self, item: QListWidgetItem) -> None:
         self.photo_activated.emit(int(item.data(Qt.ItemDataRole.UserRole)))
@@ -184,11 +197,18 @@ class PhotoGrid(QListWidget):
             return
         self._rubber_band.setGeometry(rectangle)
         self._rubber_band.show()
-        for index in range(self.count()):
-            item = self.item(index)
-            photo_id = int(item.data(Qt.ItemDataRole.UserRole))
-            selected = self.visualItemRect(item).intersects(rectangle) or photo_id in self._rubber_base
-            item.setSelected(selected)
+        self.blockSignals(True)
+        try:
+            for index in range(self.count()):
+                item = self.item(index)
+                photo_id = int(item.data(Qt.ItemDataRole.UserRole))
+                selected = self.visualItemRect(item).intersects(rectangle) or photo_id in self._rubber_base
+                if item.isSelected() != selected:
+                    item.setSelected(selected)
+        finally:
+            self.blockSignals(False)
+        self._sync_selection_style()
+        self.itemSelectionChanged.emit()
 
     def _finish_tile_rubber_band(self) -> None:
         self._rubber_band.hide()
