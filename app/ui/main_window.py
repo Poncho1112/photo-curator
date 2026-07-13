@@ -10,6 +10,7 @@ from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import QComboBox, QFileDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QSplitter, QToolBar
 
 from app.controllers.library_controller import LibraryController
+from app.views.delete_review import DeleteReviewDialog
 from app.views.folder_panel import FolderPanel
 from app.views.photo_grid import PhotoGrid
 from app.views.photo_preview import PhotoPreview
@@ -120,9 +121,11 @@ class MainWindow(QMainWindow):
         self.cancel_action = QAction("Cancel Scan", self)
         self.cancel_action.setEnabled(False)
         self.export_action = QAction("Export Manifest", self)
+        self.delete_duplicates_action = QAction("Delete Duplicates…", self)
         self.rename_action = QAction("Rename Selected (0)", self)
         self.rename_action.setEnabled(False)
         self.undo_action = QAction("Undo Last Batch", self)
+        self.undo_delete_action = QAction("Undo Delete", self)
         self.select_all_action = QAction("Select All Visible", self)
         self.clear_selection_action = QAction("Clear Selection", self)
         self.mark_action = QAction("Mark for Rename", self)
@@ -146,6 +149,7 @@ class MainWindow(QMainWindow):
         library_menu.addActions((self.scan_action, self.cancel_action))
         library_menu.addSeparator()
         library_menu.addAction("Show Duplicates", lambda: self._set_filter_checkbox(self.folder_panel.duplicates, True))
+        library_menu.addAction(self.delete_duplicates_action)
         library_menu.addAction("Show Missing", lambda: self._set_filter_checkbox(self.folder_panel.missing, True))
 
         selection_menu = self.menuBar().addMenu("&Selection")
@@ -154,7 +158,7 @@ class MainWindow(QMainWindow):
         selection_menu.addActions((self.mark_action, self.remove_rename_action, self.toggle_rename_action))
 
         edit_menu = self.menuBar().addMenu("&Edit")
-        edit_menu.addActions((self.undo_action, self.copy_path_action, self.copy_filename_action))
+        edit_menu.addActions((self.undo_action, self.undo_delete_action, self.copy_path_action, self.copy_filename_action))
 
         view_menu = self.menuBar().addMenu("&View")
         size_menu = view_menu.addMenu("Thumbnail Size")
@@ -188,8 +192,10 @@ class MainWindow(QMainWindow):
         self.scan_action.triggered.connect(self.start_scan)
         self.cancel_action.triggered.connect(self.cancel_scan)
         self.export_action.triggered.connect(self.export_manifest)
+        self.delete_duplicates_action.triggered.connect(self.delete_duplicates_flow)
         self.rename_action.triggered.connect(self.rename_selected)
         self.undo_action.triggered.connect(self.undo_latest)
+        self.undo_delete_action.triggered.connect(self.undo_delete_flow)
         self.search.textChanged.connect(lambda: self.debounce.start())
         self.debounce.timeout.connect(self.apply_filters)
         self.folder_panel.filters_changed.connect(self.apply_filters)
@@ -533,6 +539,36 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Rename complete", f"Renamed: {succeeded}\nFailed or skipped: {failed}")
         self.refresh()
 
+    def delete_duplicates_flow(self) -> None:
+        review = self.controller.delete_review()
+        if not review:
+            QMessageBox.information(
+                self,
+                "No exact duplicates",
+                "No exact duplicates were found.",
+            )
+            return
+        total_reclaimable_bytes = sum(item.reclaimable_bytes for item in review)
+        dialog = DeleteReviewDialog(review, total_reclaimable_bytes, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        try:
+            results = self.controller.delete_duplicates(review)
+        except (OSError, ValueError, ImportError) as exc:
+            log.exception("Duplicate deletion failed")
+            self._error("Duplicate deletion failed", str(exc))
+            return
+        trashed = sum(result.trashed for result in results)
+        skipped = len(results) - trashed
+        QMessageBox.information(
+            self,
+            "Duplicate deletion complete",
+            f"Moved to Recycle Bin: {trashed}\n"
+            f"Skipped: {skipped}\n"
+            "Skipped files were changed since indexing and were not deleted.",
+        )
+        self.refresh()
+
     def undo_latest(self) -> None:
         if QMessageBox.question(self, "Undo latest rename", "Restore filenames from the latest eligible batch?") != QMessageBox.StandardButton.Yes:
             return
@@ -546,6 +582,28 @@ class MainWindow(QMainWindow):
         skipped = sum(not result.undone and result.error and "overwrite" in result.error for result in results)
         failed = len(results) - restored - skipped
         QMessageBox.information(self, "Undo complete", f"Restored: {restored}\nSkipped: {skipped}\nFailed: {failed}")
+        self.refresh()
+
+    def undo_delete_flow(self) -> None:
+        if QMessageBox.question(
+            self,
+            "Undo delete",
+            "Restore the latest deletion batch from the Recycle Bin?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            results = self.controller.undo_delete()
+        except (OSError, ValueError, ImportError) as exc:
+            log.exception("Undo delete failed")
+            self._error("Undo delete failed", str(exc))
+            return
+        restored = sum(result.undone for result in results)
+        not_restored = len(results) - restored
+        QMessageBox.information(
+            self,
+            "Undo delete complete",
+            f"Restored: {restored}\nNot restored: {not_restored}",
+        )
         self.refresh()
 
     def _error(self, title: str, message: str) -> None:
