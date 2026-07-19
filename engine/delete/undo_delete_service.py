@@ -33,9 +33,25 @@ class UndoDeleteService:
             restored = Path(str(entry["original_path"]))
             trashed_value = entry.get("trashed_to")
             current = Path(str(trashed_value)) if trashed_value is not None else None
-            if current is None or not current.is_file():
+            if current is None:
                 results.append(
-                    UndoDeleteResult(current, restored, False, "trashed file does not exist; cannot restore")
+                    UndoDeleteResult(
+                        current,
+                        restored,
+                        False,
+                        "no recoverable destination was recorded for this deletion",
+                    )
+                )
+                remaining.append(entry)
+                continue
+            if not current.is_file():
+                results.append(
+                    UndoDeleteResult(
+                        current,
+                        restored,
+                        False,
+                        "trashed file no longer exists; it may have been emptied from the Recycle Bin",
+                    )
                 )
                 remaining.append(entry)
                 continue
