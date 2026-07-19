@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from engine.delete.trash_providers import select_default_trash_fn
 from engine.duplicates.exact_duplicates import sha256_file
 
 
@@ -20,16 +21,6 @@ class TrashResult:
     error: str | None = None
 
 
-def _send_to_trash(path: Path) -> None:
-    try:
-        from send2trash import send2trash
-    except ImportError as exc:
-        raise ImportError(
-            "Deleting files requires send2trash; install it with 'pip install send2trash'."
-        ) from exc
-    send2trash(path)
-
-
 class DeleteService:
     def __init__(
         self,
@@ -38,7 +29,10 @@ class DeleteService:
         hasher: Callable[[Path], str] | None = None,
     ) -> None:
         self.deletion_log = Path(deletion_log)
-        self.trash_fn = trash_fn or _send_to_trash
+        # select_default_trash_fn() picks a recoverable, platform-native
+        # provider (see engine/delete/trash_providers/) so files trashed
+        # through the default path are restorable via UndoDeleteService.
+        self.trash_fn = trash_fn or select_default_trash_fn()
         self.hasher = hasher or sha256_file
 
     def delete_paths(self, targets: Iterable[tuple[str | Path, str]]) -> list[TrashResult]:

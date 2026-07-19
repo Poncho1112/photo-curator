@@ -1,7 +1,7 @@
 # Milestone 4 — Recoverable Trash Destinations for Undo Delete
 
 Date scoped: 2026-07-19
-Status: scoped — not started. Milestone 3 (reviewed duplicate deletion) is merged; this milestone closes its known blocker.
+Status: in progress. macOS and Windows providers implemented on `feature/milestone-4-macos-windows-providers` with mocked-backend unit tests (native suite is 102 tests). Real-device verification on Windows and macOS is still required before this is considered done - see "Verification status" below. Linux is not yet covered and still falls back to `send2trash` (unrestorable), per the original scope.
 
 ## Goal
 
@@ -129,3 +129,34 @@ Bin/Trash, then Undo Delete and confirm they're restored to their original
 paths. Repeat across each of the 3 computers this project is worked from,
 recording which trash provider (native vs. Windows fallback) handled each
 run.
+
+## Verification status
+
+- **Implemented, not yet device-verified.** `engine/delete/trash_providers/`
+  (macOS and Windows) landed on `feature/milestone-4-macos-windows-providers`
+  with 13 new unit tests covering the wrapper logic against mocked/injected
+  backends (`_call_ns_file_manager_trash` on macOS, `_call_ifileoperation_trash`
+  on Windows) — none of this sandbox's tests exercise a real `pyobjc` or
+  `pywin32` call, since neither library nor a matching OS is available here.
+  Native suite: **102 passed** (89 existing + 13 new).
+- **Honest caveat — macOS:** `trash_to_macos_trash`'s default backend has
+  only been confirmed to raise the correct `ImportError` when `pyobjc` is
+  absent (true in this sandbox). The actual
+  `NSFileManager.trashItemAtURL_resultingItemURL_error_` call and its
+  PyObjC out-parameter unpacking have not been run on a real Mac.
+- **Honest caveat — Windows:** the `IFileOperation` + `PostDeleteItem`
+  sink wiring follows the documented Win32 interface but has not been run
+  against a live COM call. `pywin32`'s IFileOperation sink support has
+  been inconsistent across versions historically, so this specifically
+  needs confirmation: (1) that `Advise`/`PostDeleteItem` fires at all, (2)
+  that `GetDisplayName(SIGDN_FILESYSPATH)` returns a valid recycled path,
+  and (3) that the quarantine fallback triggers correctly when `pywin32`
+  is genuinely missing on a clean machine.
+- **Not started:** Linux native provider (XDG trash spec) — deletions on
+  Linux still go through `send2trash` and remain unrestorable.
+- **Before merging to `main`:** run the delete → Undo Delete flow through
+  the actual UI on at least one Windows machine (both with and without
+  `pywin32` installed, to exercise both the native path and the fallback)
+  and on macOS if available, using copies of real files, then update this
+  status and the "Known blocker" notes in `README.md` and
+  `docs/Architecture.md`.
