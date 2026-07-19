@@ -1,7 +1,7 @@
 # Milestone 3 — Reviewed Duplicate Deletion
 
 Date scoped: 2026-07-11
-Status: proposed
+Status: merged — reviewed duplicate deletion landed; the user confirmed the real-world copy-folder verification of survivor/deletion behavior. In-app Undo Delete exists and passes injected-provider tests, but production restoration of default `send2trash` Recycle Bin moves is a known blocker.
 
 ## Goal
 
@@ -85,3 +85,11 @@ Same discipline as M1/M2: native Python 3.14 suite plus a scripted
 end-to-end run on a *copy* of a real duplicate-heavy folder (never the
 original), proving reclaimed space, survivor integrity, and full restore.
 The trash operation is injected in tests so no file leaves the temp tree.
+
+## Verification outcome
+
+- Merged. The native suite (89 tests under `python -m pytest -q`) covers keep-policy selection, last-copy protection, pre-delete SHA-256 re-check, trash, undo with an injected provider, the delete-review UI flow, and controller validation that rejects forged reviews.
+- The user confirmed the M3 real-world copy-folder verification: deletion reclaimed space with every group retaining its chosen survivor, and the verified survivor/deletion behavior held on a copy of a real duplicate-heavy folder.
+- The Undo Delete action and `UndoDeleteService` pass tests that inject a trash provider returning a destination path; under that injected provider, trashed files are restored to their original paths. This is an injected-provider proof, not a default-production proof.
+- Known blocker: the default production trash provider is `_send_to_trash` in `engine/delete/delete_service.py`, which calls the installed `send2trash.send2trash()`. That function returns `None`, so the deletion log records `trashed_to: null`, and `UndoDeleteService` refuses restoration when `trashed_to` is `None`. Default production Recycle Bin deletions are therefore **not currently reversible** through Undo Delete until a recoverable destination integration is implemented. This does not affect survivor retention, the pre-delete SHA-256 recheck, or the Recycle Bin (non-permanent) deletion guarantee.
+- Honest caveats: deletion is exact-duplicate only (SHA-256); near-duplicate / perceptual-hash detection is not included. Deletion never permanently erases or empties the Recycle Bin; there is no permanent-delete path.

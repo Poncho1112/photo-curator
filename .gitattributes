@@ -1,0 +1,19 @@
+# Normalize text to LF; Windows batch scripts keep CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Raster images used by the photo scanner/thumbnails pipeline.
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.bmp binary
+*.tif binary
+*.tiff binary
+*.webp binary
+
+# Local catalog / SQLite database formats.
+*.sqlite binary
+*.sqlite3 binary
+*.db binary

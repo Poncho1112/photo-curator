@@ -1,7 +1,7 @@
 # Milestone 2 — Performance at Real-Library Scale
 
 Date scoped: 2026-07-11
-Status: proposed
+Status: merged — throughput optimizations landed and are benchmarked at 10k; full 10k UI acceptance against a real archive is not yet recorded.
 
 ## Goal
 
@@ -73,3 +73,11 @@ Same discipline as Milestone 1: native Python 3.14 test suite, plus the
 benchmark harness run before/after each optimization. End-to-end smoke
 (scan → filter → rename → undo) re-run against the synthetic library
 before the milestone is called done.
+
+## Verification outcome
+
+- Merged. The 10k synthetic-library benchmark artifacts under `benchmarks/` record first-index throughput improving from **31.96 s** (baseline, `baseline-2026-07-11-10k.json`) to **0.31 s** (`after-incremental-rescan-2026-07-11-10k.json`), and an unchanged re-scan improving from **103.83 s** to **3.84 s**.
+- Landed: index batching into one transaction, incremental re-scan (skip SHA-256 when path/size/mtime are unchanged), set-based `mark_missing_except`, visible-first thumbnail priority, and the thumbnail cache cap.
+- The native suite is green (89 tests under `python -m pytest -q`).
+- An offscreen desktop smoke (scan → filter → rename + undo, close during thumbnails, filter during thumbnails) is green and is recorded as automated, not visual; in the final verifier, window close completed in 0.012 s and filter apply in 0.011 s. These map to the in-repo tests `test_close_cancels_and_joins_active_thumbnail_thread` and `test_active_thumbnail_batch_queues_refresh_for_latest_visible_records`.
+- Honest caveat: full 10k UI acceptance against a real archive is not yet recorded in-repo. Throughput is benchmarked; the real-library UI run is not.
