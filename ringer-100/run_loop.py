@@ -440,12 +440,102 @@ def resolve_windows_venv_python(main_repo_root: Path) -> Path:
 # --------------------------------------------------------------------------
 
 
-def validate_and_load_allowlist(review_score: dict) -> tuple[list[str], list[str]]:
+@dataclass
+class AllowlistDecision:
+    """The result of validating a review score's owned_files / host_only_finding_ids contract."""
+
+    owned_files: list[str]
+    declared_fix_tests: list[str]
+    host_only_finding_ids: list[str]
+    host_only_round: bool  # True: every blocking finding is host-only -- skip the fix phase entirely.
+
+
+def validate_and_load_allowlist(review_score: dict, confirmed_deductions: list[dict]) -> AllowlistDecision:
+    """Validate the review score's ownership contract for a round with confirmed (P0/P1/P2)
+    findings, and decide whether the fix phase can be skipped.
+
+    Round 6's sole P2 finding was, by the reviewer's own words, not a code defect -- clearable
+    only by the authoritative host Windows UI verification -- so it correctly returned
+    owned_files=[]. The original contract unconditionally rejected an empty owned_files list
+    whenever any blocking finding existed, which blocked that round before host verification ever
+    ran. This restores fail-closed behavior for genuinely actionable findings while allowing a
+    review to explicitly, structurally declare a finding host-only.
+
+    A review may use an empty owned_files list only when host_only_finding_ids is a list of
+    unique ids exactly equal to every blocking (P0/P1/P2) finding id -- otherwise this fails
+    closed exactly as an empty owned_files list always has. If any blocking finding is not
+    host-only, a non-empty owned_files list is required as before. Host-only status is read only
+    from this explicit, structured array -- never inferred by searching a finding's free-form
+    summary text, which a worker could phrase to talk its way past ownership.
+    """
     owned_files = review_score.get("owned_files")
-    if not isinstance(owned_files, list) or not owned_files:
-        raise LoopError("review score JSON has no non-empty owned_files allowlist; refusing to run a fix phase")
+    if not isinstance(owned_files, list) or not all(isinstance(f, str) for f in owned_files):
+        raise LoopError("review score JSON's owned_files is missing or not a list of strings")
     declared_fix_tests = review_score.get("declared_fix_tests", [])
-    return owned_files, declared_fix_tests
+    if not isinstance(declared_fix_tests, list) or not all(isinstance(f, str) for f in declared_fix_tests):
+        raise LoopError("review score JSON's declared_fix_tests is not a list of strings")
+
+    host_only_ids = review_score.get("host_only_finding_ids", [])
+    if not isinstance(host_only_ids, list) or not all(isinstance(i, str) and i for i in host_only_ids):
+        raise LoopError("review score JSON's host_only_finding_ids is missing or not a list of non-empty strings")
+    if len(host_only_ids) != len(set(host_only_ids)):
+        raise LoopError(f"review score JSON's host_only_finding_ids contains duplicate ids: {host_only_ids}")
+
+    findings = review_score.get("findings", [])
+    if not isinstance(findings, list):
+        findings = []
+    finding_by_id: dict[str, dict] = {}
+    for finding in findings:
+        if isinstance(finding, dict) and isinstance(finding.get("id"), str) and finding["id"]:
+            finding_by_id[finding["id"]] = finding
+
+    for deduction in confirmed_deductions:
+        fid = deduction.get("id")
+        if not isinstance(fid, str) or not fid:
+            raise LoopError(
+                "a blocking (P0/P1/P2) finding is missing a non-empty 'id' field, required to validate "
+                f"host_only_finding_ids: {deduction.get('file')}:{deduction.get('line')} {deduction.get('summary')!r}"
+            )
+
+    blocking_ids = {deduction["id"] for deduction in confirmed_deductions}
+
+    unknown_ids = sorted(i for i in host_only_ids if i not in finding_by_id)
+    if unknown_ids:
+        raise LoopError(f"host_only_finding_ids names finding id(s) not present in findings: {unknown_ids}")
+
+    non_blocking_named = sorted(
+        i for i in host_only_ids if finding_by_id[i].get("severity") not in validate_score.BLOCKING_SEVERITIES
+    )
+    if non_blocking_named:
+        raise LoopError(
+            "host_only_finding_ids names non-blocking (P3/info) finding id(s); host_only_finding_ids is only "
+            f"for findings resolvable solely by an existing rubric-required host gate: {non_blocking_named}"
+        )
+
+    host_only_ids_set = set(host_only_ids)
+
+    if not owned_files:
+        if host_only_ids_set != blocking_ids:
+            raise LoopError(
+                "review score JSON has an empty owned_files allowlist but host_only_finding_ids "
+                f"({sorted(host_only_ids_set)}) does not exactly equal every blocking P0/P1/P2 finding id "
+                f"({sorted(blocking_ids)}); refusing to run a fix phase. host_only_finding_ids may only be used "
+                "for findings resolvable solely by an existing rubric-required host gate -- never for "
+                "documentation, tests, or code work."
+            )
+        return AllowlistDecision(
+            owned_files=[],
+            declared_fix_tests=declared_fix_tests,
+            host_only_finding_ids=sorted(host_only_ids_set),
+            host_only_round=True,
+        )
+
+    return AllowlistDecision(
+        owned_files=owned_files,
+        declared_fix_tests=declared_fix_tests,
+        host_only_finding_ids=sorted(host_only_ids_set),
+        host_only_round=False,
+    )
 
 
 def validate_fix_patch(patch_path: Path, owned_files: list[str], declared_fix_tests: list[str]) -> None:
@@ -670,7 +760,18 @@ def build_review_manifest(
             "authoritative score.json after this task completes. Also include an owned_files "
             "array: the exact list of repository file paths a later fix worker would need to edit "
             "to address your confirmed P0/P1/P2 findings, and (if any) a declared_fix_tests array "
-            "naming test files the fix worker may add to or edit."
+            "naming test files the fix worker may add to or edit. Give every finding a stable, "
+            "unique 'id' string (e.g. 'F1', 'F2'). If -- and only if -- every one of your "
+            "confirmed P0/P1/P2 findings is resolvable solely by an existing rubric-required host "
+            "gate (never by documentation, tests, or code work -- e.g. a finding that is not "
+            "itself a code defect and can only be cleared by the authoritative host Windows UI "
+            "verification), you may leave owned_files empty and instead set host_only_finding_ids "
+            "to the exact list of those findings' ids, unique and exactly matching every one of "
+            "your confirmed P0/P1/P2 finding ids. Any review with even one actionable finding "
+            "still requires a non-empty owned_files list as normal. Never infer host-only status "
+            "from a finding's summary text -- host_only_finding_ids is the only signal the "
+            "controller reads, and an empty owned_files list without an exactly matching "
+            "host_only_finding_ids fails closed."
         ),
     )
     return {
@@ -802,7 +903,17 @@ def build_regrade_manifest(
             "anywhere in the main repository) -- your own per-task artifact path, not the round's "
             "final score. Ringer creates your task's working directory at <phase workdir>/<task "
             "key>, one level below the manifest's own workdir. Include owned_files (can be empty "
-            "if you find no further confirmed P0/P1/P2 findings)."
+            "if you find no further confirmed P0/P1/P2 findings, or if every remaining confirmed "
+            "P0/P1/P2 finding is host-only -- see below). Give every finding a stable, unique "
+            "'id' string. If every one of your confirmed P0/P1/P2 findings is resolvable solely "
+            "by an existing rubric-required host gate (never by documentation, tests, or code "
+            "work), you may leave owned_files empty and instead set host_only_finding_ids to the "
+            "exact list of those findings' ids, unique and exactly matching every confirmed "
+            "P0/P1/P2 finding id. Any review with even one actionable finding still requires a "
+            "non-empty owned_files list as normal. Never infer host-only status from a finding's "
+            "summary text -- host_only_finding_ids is the only signal the controller reads, and "
+            "an empty owned_files list without an exactly matching host_only_finding_ids fails "
+            "closed."
         ),
     )
     return {
@@ -1130,11 +1241,49 @@ class LoopOrchestrator:
                 "last_confirmed_deductions": [],
             }
 
-        owned_files, declared_fix_tests = validate_and_load_allowlist(review_score)
-        accumulated_owned_files = sorted(set(state.get("all_owned_files", [])) | set(owned_files))
-        accumulated_declared_fix_tests = sorted(set(state.get("all_declared_fix_tests", [])) | set(declared_fix_tests))
+        decision = validate_and_load_allowlist(review_score, confirmed_deductions)
+        accumulated_owned_files = sorted(set(state.get("all_owned_files", [])) | set(decision.owned_files))
+        accumulated_declared_fix_tests = sorted(
+            set(state.get("all_declared_fix_tests", [])) | set(decision.declared_fix_tests)
+        )
 
-        # --- Fix phase: direct edit of the persistent integration worktree ------
+        if decision.host_only_round:
+            # Every blocking finding is host-only (e.g. clearable only by the authoritative
+            # Windows UI verifier, never by code): skip the model fix phase and patch machinery
+            # entirely and run every host gate directly against the unchanged accumulated
+            # integration worktree -- there is nothing for a rollback to undo.
+            atomic_write_json(
+                rdir / "fix" / "host-only-round.json",
+                {"host_only_finding_ids": decision.host_only_finding_ids},
+            )
+
+            def rollback() -> None:
+                return None
+        else:
+            rollback = self._run_fix_phase(
+                round_no, rdir, integration_worktree, decision, accumulated_owned_files,
+                accumulated_declared_fix_tests, confirmed_deductions,
+            )
+
+        return self._verify_and_regrade(
+            round_no, state, rdir, integration_worktree, review_score, confirmed_deductions,
+            commands_evidence, rollback, accumulated_owned_files, accumulated_declared_fix_tests,
+        )
+
+    def _run_fix_phase(
+        self,
+        round_no: int,
+        rdir: Path,
+        integration_worktree: Path,
+        decision: AllowlistDecision,
+        accumulated_owned_files: list[str],
+        accumulated_declared_fix_tests: list[str],
+        confirmed_deductions: list[dict],
+    ) -> Callable[[], None]:
+        """Direct edit of the persistent integration worktree for a round with actionable
+        (non-host-only) findings. Returns a ``rollback`` callable that restores the exact
+        pre-round integration worktree state; raises (after rolling back) if the fix patch fails
+        ownership validation or is not cleanly reversible."""
         fix_phase_dir = rdir / "fix"
         pre_tree = snapshot_worktree_tree(integration_worktree, fix_phase_dir, "pre", run=self.run)
         atomic_write_json(fix_phase_dir / "round-trees.json", {"pre_tree": pre_tree, "post_tree": None})
@@ -1145,9 +1294,9 @@ class LoopOrchestrator:
             self.state_root,
             self.repo_root,
             integration_worktree,
-            owned_files,
+            decision.owned_files,
             accumulated_owned_files,
-            declared_fix_tests,
+            decision.declared_fix_tests,
             accumulated_declared_fix_tests,
             confirmed_deductions,
         )
@@ -1165,18 +1314,42 @@ class LoopOrchestrator:
         atomic_write_text(round_delta_path, round_delta)
         atomic_write_json(fix_phase_dir / "round-trees.json", {"pre_tree": pre_tree, "post_tree": post_tree})
 
-        try:
-            validate_fix_patch(round_delta_path, owned_files, declared_fix_tests)
-        except LoopError:
+        def rollback() -> None:
             rollback_round_delta(integration_worktree, fix_phase_dir, round_delta_path, pre_tree, run=self.run)
+
+        try:
+            validate_fix_patch(round_delta_path, decision.owned_files, decision.declared_fix_tests)
+        except LoopError:
+            rollback()
             raise
 
         if not confirm_round_delta_reversible(integration_worktree, round_delta_path, run=self.run):
-            rollback_round_delta(integration_worktree, fix_phase_dir, round_delta_path, pre_tree, run=self.run)
+            rollback()
             raise LoopError(
                 f"round {round_no}: this round's fix delta is not cleanly reversible; rolled back "
                 "before host verification"
             )
+
+        return rollback
+
+    def _verify_and_regrade(
+        self,
+        round_no: int,
+        state: dict,
+        rdir: Path,
+        integration_worktree: Path,
+        review_score: dict,
+        confirmed_deductions: list[dict],
+        commands_evidence: list[str],
+        rollback: Callable[[], None],
+        accumulated_owned_files: list[str],
+        accumulated_declared_fix_tests: list[str],
+    ) -> dict:
+        """Host verification + regrade tail shared by both the actionable-fix and host-only round
+        flows: identical rubric/prompt regrade, identical host-authority forcing of
+        host_gates/host_evidence_paths, identical rollback-on-failure contract. Only how (or
+        whether) a fix phase ran before this differs between callers."""
+        rubric_path = self.repo_root / self.config["rubric_path"]
 
         # --- Host verification (targets the integration worktree) ---------------
         gate_results, host_evidence, host_evidence_paths = run_host_verification(
@@ -1190,7 +1363,7 @@ class LoopOrchestrator:
         )
 
         if not all(gate_results.values()):
-            rollback_round_delta(integration_worktree, fix_phase_dir, round_delta_path, pre_tree, run=self.run)
+            rollback()
             failed_gates = [name for name, passed in gate_results.items() if not passed]
             return {
                 "round": round_no,
@@ -1199,8 +1372,6 @@ class LoopOrchestrator:
                 "failed_gates": failed_gates,
                 "commands_evidence": commands_evidence,
                 "last_confirmed_deductions": confirmed_deductions,
-                "pre_tree": pre_tree,
-                "post_tree": post_tree,
             }
 
         # --- Regrade (identical rubric/prompt to review; host authority forced) -
@@ -1231,7 +1402,7 @@ class LoopOrchestrator:
         commands_evidence.append(f"validated {regrade_score_path}")
 
         if not regrade_result.ok:
-            rollback_round_delta(integration_worktree, fix_phase_dir, round_delta_path, pre_tree, run=self.run)
+            rollback()
             return {
                 "round": round_no,
                 "score_total": regrade_score.get("total"),
@@ -1240,11 +1411,10 @@ class LoopOrchestrator:
                 "last_confirmed_deductions": confirmed_deductions,
                 "regrade_ok": False,
                 "regrade_failures": regrade_result.failures,
-                "pre_tree": pre_tree,
-                "post_tree": post_tree,
             }
 
-        # Regrade validated: this round's delta is kept. Accumulate ownership for the final export.
+        # Regrade validated: this round's delta (if any) is kept. Accumulate ownership for the
+        # final export.
         state["all_owned_files"] = accumulated_owned_files
         state["all_declared_fix_tests"] = accumulated_declared_fix_tests
 
@@ -1256,8 +1426,6 @@ class LoopOrchestrator:
             "last_confirmed_deductions": confirmed_deductions,
             "regrade_ok": regrade_result.ok,
             "regrade_failures": regrade_result.failures,
-            "pre_tree": pre_tree,
-            "post_tree": post_tree,
         }
 
     def _export_success(self, state: dict) -> None:
@@ -1284,7 +1452,41 @@ class LoopOrchestrator:
         assert_clean_repo(self.repo_root, self.state_root, run=self.run)
         apply_patch(self.repo_root, final_patch_path, run=self.run)
 
-    def run_loop(self, *, resume: bool) -> int:
+    def _recover_blocked(self, state: dict) -> None:
+        """``--resume --recover-blocked``: explicitly move a persisted safety-blocked run back to
+        ``in_progress`` so the loop can retry, without ever auto-deleting or overwriting a partial
+        round. Only ever mutates ``status`` -- ``next_round``, ``rounds``, ``score_history``,
+        ``integration_worktree``, and every on-disk round artifact are left exactly as they were,
+        and the write is atomic (``save_state`` -> ``atomic_write_json``, temp file + os.replace).
+
+        Refuses unless the persisted status is exactly ``blocked`` (ordinary ``--resume`` already
+        no-ops on ``blocked`` without this flag) and unless the round directory the loop would
+        resume into does not already exist -- a round that raised a ``LoopError`` mid-flight
+        leaves ``next_round`` pointing at that same, now-partial round directory, and recovering
+        into it silently would risk overwriting whatever the failed round already wrote. The
+        caller must archive or remove that directory manually first.
+        """
+        if state.get("status") != "blocked":
+            raise LoopError(
+                "--recover-blocked requires a persisted status of 'blocked'; found "
+                f"{state.get('status')!r} at {self.state_root}/state.json"
+            )
+        target_round_dir = round_dir(self.state_root, state.get("next_round", 1))
+        if target_round_dir.exists():
+            raise LoopError(
+                f"refusing to recover: round directory already exists at {target_round_dir}. This loop "
+                "never auto-deletes or overwrites a partial round -- archive or remove that directory "
+                "manually (e.g. move it aside), then re-run --resume --recover-blocked."
+            )
+        state["status"] = "in_progress"
+        save_state(self.state_root, state)
+
+    def run_loop(self, *, resume: bool, recover_blocked: bool = False) -> int:
+        if recover_blocked and not resume:
+            raise LoopError(
+                "--recover-blocked requires --resume: there is no persisted blocked run to recover without it"
+            )
+
         existing_state = load_state(self.state_root)
         if not resume and existing_state is not None:
             raise LoopError(
@@ -1302,7 +1504,9 @@ class LoopOrchestrator:
                 "all_declared_fix_tests": [],
             }
 
-        if state.get("status") in ("success", "blocked"):
+        if recover_blocked:
+            self._recover_blocked(state)
+        elif state.get("status") in ("success", "blocked"):
             print(f"loop already concluded with status={state['status']!r}; nothing to do")
             return 0 if state["status"] == "success" else 1
 
@@ -1392,6 +1596,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="print the next round's plan; no mutation, no model calls")
     parser.add_argument("--resume", action="store_true", help="continue a previously started run from its persisted state")
+    parser.add_argument(
+        "--recover-blocked",
+        action="store_true",
+        help=(
+            "with --resume: move a persisted status='blocked' run back to 'in_progress' so it can "
+            "retry, refusing if the round it would resume into already has an on-disk directory "
+            "(archive/remove that directory manually first). Ordinary --resume on a blocked run "
+            "remains a no-op without this flag."
+        ),
+    )
     parser.add_argument("--repo", type=Path, default=None, help="repository root (default: resolved for this host)")
     parser.add_argument("--ringer-root", type=Path, default=None, help="Ringer install root (default: resolved for this host)")
     parser.add_argument("--state-root", type=Path, default=None, help="override the loop's state/artifact root")
@@ -1428,7 +1642,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.resume:
             orchestrator.assert_clean_start()
 
-        return orchestrator.run_loop(resume=args.resume)
+        return orchestrator.run_loop(resume=args.resume, recover_blocked=args.recover_blocked)
     except LoopError as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)
         return 1

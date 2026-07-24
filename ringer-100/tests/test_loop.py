@@ -1542,6 +1542,138 @@ class TestPlateau:
 
 
 # --------------------------------------------------------------------------
+# run_loop.py -- host_only_finding_ids / owned_files allowlist contract.
+#
+# Round 6's sole P2 finding said, in the reviewer's own words, that it was
+# not a code defect and could only be cleared by the authoritative host
+# Windows UI verification -- so it correctly returned owned_files=[]. The
+# original contract unconditionally rejected an empty owned_files allowlist
+# whenever any P0/P1/P2 finding existed, which blocked exactly that round
+# before host verification ever ran. validate_and_load_allowlist restores
+# fail-closed behavior for genuinely actionable findings while allowing a
+# review to explicitly, structurally declare a finding host-only -- never by
+# searching a finding's free-form summary text.
+# --------------------------------------------------------------------------
+
+
+def _finding(fid, severity, *, file="engine/delete/delete_service.py", line=10, summary="x"):
+    d = {"severity": severity, "file": file, "line": line, "summary": summary}
+    if fid is not None:
+        d["id"] = fid
+    return d
+
+
+class TestValidateAndLoadAllowlist:
+    def test_actionable_review_with_owned_files_is_unchanged(self):
+        findings = [_finding("F1", "P1")]
+        score = {"owned_files": ["engine/delete/delete_service.py"], "declared_fix_tests": [], "findings": findings}
+        decision = run_loop.validate_and_load_allowlist(score, findings)
+        assert decision.owned_files == ["engine/delete/delete_service.py"]
+        assert decision.declared_fix_tests == []
+        assert decision.host_only_round is False
+        assert decision.host_only_finding_ids == []
+
+    def test_all_blocking_findings_host_only_with_empty_owned_files_is_accepted(self):
+        findings = [_finding("F1", "P2"), _finding("F2", "P1")]
+        score = {"owned_files": [], "host_only_finding_ids": ["F1", "F2"], "findings": findings}
+        decision = run_loop.validate_and_load_allowlist(score, findings)
+        assert decision.owned_files == []
+        assert decision.host_only_round is True
+        assert decision.host_only_finding_ids == ["F1", "F2"]
+
+    def test_empty_owned_files_without_host_only_finding_ids_fails_closed(self):
+        findings = [_finding("F1", "P1")]
+        score = {"owned_files": [], "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="does not exactly equal every blocking"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_empty_owned_files_with_partial_host_only_finding_ids_fails_closed(self):
+        """A strict subset of the blocking ids is not "every" blocking finding -- fails closed
+        exactly like an unconditionally empty owned_files always has."""
+        findings = [_finding("F1", "P2"), _finding("F2", "P1")]
+        score = {"owned_files": [], "host_only_finding_ids": ["F1"], "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="does not exactly equal every blocking"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_host_only_finding_ids_naming_unknown_id_is_rejected(self):
+        findings = [_finding("F1", "P1")]
+        score = {"owned_files": [], "host_only_finding_ids": ["F1", "F9"], "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="not present in findings"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_host_only_finding_ids_with_duplicates_is_rejected(self):
+        findings = [_finding("F1", "P1")]
+        score = {"owned_files": [], "host_only_finding_ids": ["F1", "F1"], "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="duplicate ids"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_host_only_finding_ids_naming_a_p3_finding_is_rejected(self):
+        blocking = [_finding("F1", "P1")]
+        all_findings = blocking + [_finding("F2", "P3")]
+        score = {"owned_files": [], "host_only_finding_ids": ["F1", "F2"], "findings": all_findings}
+        with pytest.raises(run_loop.LoopError, match="non-blocking"):
+            run_loop.validate_and_load_allowlist(score, blocking)
+
+    def test_host_only_finding_ids_naming_an_info_finding_is_rejected(self):
+        blocking = [_finding("F1", "P1")]
+        all_findings = blocking + [_finding("F2", "info")]
+        score = {"owned_files": [], "host_only_finding_ids": ["F1", "F2"], "findings": all_findings}
+        with pytest.raises(run_loop.LoopError, match="non-blocking"):
+            run_loop.validate_and_load_allowlist(score, blocking)
+
+    def test_blocking_finding_missing_id_is_rejected_even_with_owned_files(self):
+        """A missing id blocks the whole round, even on the ordinary owned_files path -- the
+        contract can't be validated without one, and this loop fails closed rather than assume
+        the finding isn't host-only."""
+        findings = [_finding(None, "P1")]
+        score = {"owned_files": ["engine/delete/delete_service.py"], "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="missing a non-empty 'id' field"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_owned_files_not_a_list_is_rejected(self):
+        findings = [_finding("F1", "P1")]
+        score = {"owned_files": "engine/delete/delete_service.py", "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="owned_files is missing or not a list"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_host_only_finding_ids_not_a_list_is_rejected(self):
+        findings = [_finding("F1", "P1")]
+        score = {"owned_files": [], "host_only_finding_ids": {"F1": True}, "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="host_only_finding_ids is missing or not a list"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_declared_fix_tests_not_a_list_is_rejected(self):
+        findings = [_finding("F1", "P1")]
+        score = {"owned_files": ["x.py"], "declared_fix_tests": "tests/test_x.py", "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="declared_fix_tests is not a list"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_mixed_actionable_and_host_only_findings_requires_non_empty_owned_files(self):
+        """One actionable finding alongside one genuinely host-only finding: owned_files must
+        still be non-empty, exactly as if host_only_finding_ids didn't exist -- it never lets a
+        mixed round skip ownership for the actionable finding."""
+        findings = [_finding("F1", "P2"), _finding("F2", "P1")]
+        score = {"owned_files": [], "host_only_finding_ids": ["F1"], "findings": findings}
+        with pytest.raises(run_loop.LoopError, match="does not exactly equal every blocking"):
+            run_loop.validate_and_load_allowlist(score, findings)
+
+    def test_mixed_with_non_empty_owned_files_and_partial_host_only_is_accepted_as_actionable(self):
+        """The same mix, but with owned_files correctly populated for the actionable finding:
+        accepted as a normal (non-host-only) round; host_only_finding_ids is preserved for
+        audit but does not change the round shape."""
+        findings = [_finding("F1", "P2"), _finding("F2", "P1")]
+        score = {
+            "owned_files": ["engine/delete/delete_service.py"],
+            "host_only_finding_ids": ["F1"],
+            "findings": findings,
+        }
+        decision = run_loop.validate_and_load_allowlist(score, findings)
+        assert decision.host_only_round is False
+        assert decision.owned_files == ["engine/delete/delete_service.py"]
+        assert decision.host_only_finding_ids == ["F1"]
+
+
+# --------------------------------------------------------------------------
 # run_loop.py -- manifest materialization (add-dir, score-worker.json, no
 # nested Ringer worktree for the fix phase, identical review/regrade prompt)
 # --------------------------------------------------------------------------
@@ -2012,6 +2144,151 @@ class TestOrchestratorRunLoop:
 
 
 # --------------------------------------------------------------------------
+# run_loop.py -- BLOCKED recovery: --resume --recover-blocked
+#
+# Explicit, human-decided recovery for a persisted safety-blocked run. Never
+# automatic, never deletes/overwrites a partial round -- it only ever flips
+# status back to in_progress, and only when the caller has confirmed (by the
+# absence of an on-disk round directory) that there is nothing partial to
+# clobber.
+# --------------------------------------------------------------------------
+
+
+class TestRecoverBlocked:
+    def _orchestrator(self, tmp_path):
+        config = {
+            "run_name": "photo-curator-100", "worker": {"engine": "claude", "model": "sonnet"},
+            "worker_timeout_s": 1800, "rubric_path": "ringer-100/rubric-v1.json",
+            "max_rounds": 10, "plateau_rounds": 2,
+        }
+        rubric = _rubric_dict(REAL_RUBRIC_PATH)
+        state_root = tmp_path / "state"
+        orchestrator = run_loop.LoopOrchestrator(
+            config=config, rubric=rubric, repo_root=tmp_path, ringer_root=Path("/ringer"),
+            state_root=state_root, run=SequenceRunner([]),
+        )
+        orchestrator._ensure_integration_worktree = lambda state: (
+            state.setdefault("integration_worktree", str(FAKE_WSL_WORKTREE)),
+            setattr(orchestrator, "integration_worktree", FAKE_WSL_WORKTREE),
+        )
+        return orchestrator
+
+    def test_recover_blocked_without_resume_raises(self, tmp_path):
+        orchestrator = self._orchestrator(tmp_path)
+        with pytest.raises(run_loop.LoopError, match="--recover-blocked requires --resume"):
+            orchestrator.run_loop(resume=False, recover_blocked=True)
+
+    def test_recover_blocked_requires_persisted_status_blocked(self, tmp_path):
+        """No prior run at all: the freshly-built default state is 'in_progress', not 'blocked'
+        -- recovery has nothing to recover and refuses."""
+        orchestrator = self._orchestrator(tmp_path)
+        with pytest.raises(run_loop.LoopError, match="requires a persisted status of 'blocked'"):
+            orchestrator.run_loop(resume=True, recover_blocked=True)
+
+    def test_recover_blocked_refuses_on_success_status(self, tmp_path):
+        orchestrator = self._orchestrator(tmp_path)
+        run_loop.save_state(
+            orchestrator.state_root,
+            {"run_name": "photo-curator-100", "rounds": [], "score_history": [100], "status": "success", "next_round": 2},
+        )
+        with pytest.raises(run_loop.LoopError, match="requires a persisted status of 'blocked'"):
+            orchestrator.run_loop(resume=True, recover_blocked=True)
+
+    def test_recover_blocked_refuses_when_target_round_dir_already_exists(self, tmp_path):
+        """A LoopError mid-round leaves next_round pointing at that same, now-partial round
+        directory (next_round is only advanced on a completed round). Recovery must refuse
+        rather than resume straight into partially-written artifacts."""
+        orchestrator = self._orchestrator(tmp_path)
+        run_loop.save_state(
+            orchestrator.state_root,
+            {"run_name": "photo-curator-100", "rounds": [], "score_history": [], "status": "blocked", "next_round": 3},
+        )
+        partial_round_dir = run_loop.round_dir(orchestrator.state_root, 3)
+        partial_round_dir.mkdir(parents=True)
+        (partial_round_dir / "review-manifest.json").write_text("{}", encoding="utf-8")
+
+        with pytest.raises(run_loop.LoopError, match="round directory already exists"):
+            orchestrator.run_loop(resume=True, recover_blocked=True)
+
+        # Refusal must not have mutated the persisted state.
+        state = run_loop.load_state(orchestrator.state_root)
+        assert state["status"] == "blocked"
+        assert (partial_round_dir / "review-manifest.json").is_file()
+
+    def test_recover_blocked_flips_status_and_preserves_everything_else(self, tmp_path):
+        orchestrator = self._orchestrator(tmp_path)
+        run_loop.save_state(
+            orchestrator.state_root,
+            {
+                "run_name": "photo-curator-100",
+                "rounds": [{"round": 1, "score_total": 70}],
+                "score_history": [70],
+                "status": "blocked",
+                "next_round": 2,
+                "integration_worktree": str(FAKE_WSL_WORKTREE),
+                "all_owned_files": ["engine/delete/delete_service.py"],
+                "all_declared_fix_tests": ["tests/test_delete_service.py"],
+            },
+        )
+        calls = []
+        orchestrator._run_round = lambda round_no, state: calls.append(round_no) or {
+            "round": round_no, "score_total": 100, "status": "completed",
+            "commands_evidence": [], "last_confirmed_deductions": [], "regrade_ok": True, "regrade_failures": [],
+        }
+        orchestrator._export_success = lambda state: None
+
+        code = orchestrator.run_loop(resume=True, recover_blocked=True)
+
+        assert code == 0
+        assert calls == [2]  # resumed exactly where it left off, not restarted at round 1
+        state = run_loop.load_state(orchestrator.state_root)
+        assert state["status"] == "success"  # the recovered round then completed normally
+        assert state["rounds"][0] == {"round": 1, "score_total": 70}  # prior round history preserved
+        assert state["integration_worktree"] == str(FAKE_WSL_WORKTREE)
+        assert state["all_owned_files"] == ["engine/delete/delete_service.py"]
+        assert state["all_declared_fix_tests"] == ["tests/test_delete_service.py"]
+
+    def test_recover_blocked_on_plateau_style_block_proceeds_immediately(self, tmp_path):
+        """A plateau/max-rounds block always happens BETWEEN rounds (next_round already points at
+        a fresh, not-yet-created round), so recovery's round-dir check never blocks it -- only a
+        mid-round LoopError leaves a partial directory behind."""
+        orchestrator = self._orchestrator(tmp_path)
+        run_loop.save_state(
+            orchestrator.state_root,
+            {
+                "run_name": "photo-curator-100", "rounds": [{"round": 1, "score_total": 80}],
+                "score_history": [80, 80, 80], "status": "blocked", "next_round": 4,
+                "integration_worktree": str(FAKE_WSL_WORKTREE),
+            },
+        )
+        assert not run_loop.round_dir(orchestrator.state_root, 4).exists()
+        calls = []
+        orchestrator._run_round = lambda round_no, state: calls.append(round_no) or {
+            "round": round_no, "score_total": 100, "status": "completed",
+            "commands_evidence": [], "last_confirmed_deductions": [], "regrade_ok": True, "regrade_failures": [],
+        }
+        orchestrator._export_success = lambda state: None
+
+        code = orchestrator.run_loop(resume=True, recover_blocked=True)
+        assert code == 0
+        assert calls == [4]
+
+    def test_ordinary_resume_without_recover_flag_remains_a_noop_on_blocked(self, tmp_path):
+        """The exact behavior --resume on a blocked run has always had: --recover-blocked is
+        opt-in, never implied by --resume alone."""
+        orchestrator = self._orchestrator(tmp_path)
+        run_loop.save_state(
+            orchestrator.state_root,
+            {"run_name": "photo-curator-100", "rounds": [], "score_history": [70], "status": "blocked", "next_round": 2},
+        )
+        orchestrator._run_round = lambda round_no, state: pytest.fail("must not run another round")
+        code = orchestrator.run_loop(resume=True, recover_blocked=False)
+        assert code == 1
+        state = run_loop.load_state(orchestrator.state_root)
+        assert state["status"] == "blocked"
+
+
+# --------------------------------------------------------------------------
 # run_loop.py -- defect 3: success export to the main checkout
 # --------------------------------------------------------------------------
 
@@ -2154,6 +2431,280 @@ class TestRoundIntegration:
         )
         with pytest.raises(run_loop.LoopError, match="no integration worktree is set"):
             orchestrator._run_round(1, {"score_history": []})
+
+    # --- host-only findings: round shape -------------------------------------
+
+    def _stub_venv(self, repo_root: Path) -> Path:
+        venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("stub")
+        return venv_python
+
+    def test_host_only_round_skips_fix_phase_but_runs_host_gates_and_regrade(self, rubric_copy, monkeypatch):
+        """Round 6's defect, reproduced end to end: a P2 finding that is not a code defect and is
+        only clearable by the authoritative host Windows UI verification. owned_files=[] with
+        host_only_finding_ids naming exactly that finding must reach a completed round -- running
+        every host gate and the identical regrade -- without ever invoking the fix phase.
+
+        integration_worktree below is a real Windows tmp_path directory (not the WSL-mounted
+        FAKE_WSL_WORKTREE), because this test writes a real cited_file under it that
+        validate_score's file-citation existence check must find on disk. build_review_manifest /
+        build_regrade_manifest still call wsl_mnt_path_to_windows() on that same value to build
+        --add-dir -- correctly, since a real WSL invocation always passes a /mnt/<drive> path --
+        so only that conversion is monkeypatched here; wsl_mnt_path_to_windows itself stays exactly
+        as strict as TestWslToWindowsPathConversion requires."""
+        repo_root, rubric_path = rubric_copy
+        rubric = _rubric_dict(rubric_path)
+        venv_python = self._stub_venv(repo_root)
+        monkeypatch.setattr(run_loop, "wsl_mnt_path_to_windows", lambda p: str(p))
+        config = {
+            "run_name": "photo-curator-100",
+            "worker": {"engine": "claude", "model": "sonnet"},
+            "worker_timeout_s": 1800,
+            "rubric_path": "ringer-100/rubric-v1.json",
+            "host_verification": {
+                "commands": [{"name": "native_suite_passed", "cmd": ["{VENV_PYTHON}", "-m", "pytest"]}]
+            },
+        }
+        integration_worktree = repo_root / "ringer-100" / "state" / "integration-worktree"
+        cited_file = integration_worktree / "engine" / "delete" / "windows_recycle_bin.py"
+        cited_file.parent.mkdir(parents=True)
+        cited_file.write_text("existing\n", encoding="utf-8")
+
+        review_score = _base_score(rubric, rubric_path)
+        review_score["categories"]["data_file_safety"]["score"] = 15
+        review_score["total"] = 95
+        review_score["owned_files"] = []
+        review_score["host_only_finding_ids"] = ["F1"]
+        review_score["findings"] = [
+            {
+                "id": "F1", "severity": "P2", "file": "engine/delete/windows_recycle_bin.py", "line": 42,
+                "summary": "not a code defect; only clearable by the authoritative host Windows UI verification",
+            }
+        ]
+
+        regrade_score = _base_score(rubric, rubric_path)
+        regrade_score["categories"]["data_file_safety"]["score"] = 15
+        regrade_score["total"] = 95
+        regrade_score["owned_files"] = []
+        regrade_score["findings"] = []
+
+        lint_calls: list[str] = []
+        run_calls: list[str] = []
+        host_gate_calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == sys.executable and len(cmd) > 2 and cmd[2] == "lint":
+                lint_calls.append(str(cmd[3]))
+                return FakeProc(returncode=0)
+            if cmd[0] == sys.executable and len(cmd) > 2 and cmd[2] == "run":
+                manifest = json.loads(Path(cmd[3]).read_text(encoding="utf-8"))
+                task = manifest["tasks"][0]
+                run_calls.append(task["key"])
+                score_path = Path(manifest["workdir"]) / task["key"] / task["expect_files"][0]
+                score_path.parent.mkdir(parents=True, exist_ok=True)
+                if task["key"].startswith("review-round-"):
+                    score_path.write_text(json.dumps(review_score), encoding="utf-8")
+                elif task["key"].startswith("regrade-round-"):
+                    score_path.write_text(json.dumps(regrade_score), encoding="utf-8")
+                else:
+                    raise AssertionError(f"unexpected run task key (fix phase must never run here): {task['key']}")
+                return FakeProc(returncode=0)
+            if cmd[0] == str(venv_python):
+                host_gate_calls.append(cmd)
+                return FakeProc(returncode=0)
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        state_root = repo_root / "ringer-100" / "state"
+        orchestrator = run_loop.LoopOrchestrator(
+            config=config, rubric=rubric, repo_root=repo_root, ringer_root=Path("/ringer"),
+            state_root=state_root, run=fake_run,
+        )
+        orchestrator.integration_worktree = integration_worktree
+        state = {"score_history": [], "all_owned_files": [], "all_declared_fix_tests": []}
+        result = orchestrator._run_round(1, state)
+
+        assert result["status"] == "completed"
+        assert result["score_total"] == 95
+        assert result["regrade_ok"] is True
+        assert run_calls == ["review-round-01", "regrade-round-01"]
+        assert not any("fix-manifest.json" in path for path in lint_calls)
+        assert len(host_gate_calls) == 1  # host gates still ran against the unchanged worktree
+
+        host_only_marker = state_root / "round-01" / "fix" / "host-only-round.json"
+        assert host_only_marker.is_file()
+        assert json.loads(host_only_marker.read_text(encoding="utf-8"))["host_only_finding_ids"] == ["F1"]
+        assert not (state_root / "round-01" / "fix-manifest.json").exists()
+        assert not (state_root / "round-01" / "fix" / "round-delta.patch").exists()
+        # A host-only round still accumulates ownership bookkeeping (empty, in this case).
+        assert state["all_owned_files"] == []
+
+    def test_mixed_findings_with_empty_owned_files_blocks_before_fix_phase(self, rubric_copy, monkeypatch):
+        """A finding that IS host-only alongside one that is genuinely actionable: an empty
+        owned_files list must still fail closed, and the fix phase must never be reached.
+
+        See test_host_only_round_skips_fix_phase_but_runs_host_gates_and_regrade above for why
+        integration_worktree is a real Windows tmp_path directory here and only the --add-dir
+        conversion (not wsl_mnt_path_to_windows itself) is monkeypatched."""
+        repo_root, rubric_path = rubric_copy
+        rubric = _rubric_dict(rubric_path)
+        config = {
+            "run_name": "photo-curator-100", "worker": {"engine": "claude", "model": "sonnet"},
+            "worker_timeout_s": 1800, "rubric_path": "ringer-100/rubric-v1.json",
+        }
+        monkeypatch.setattr(run_loop, "wsl_mnt_path_to_windows", lambda p: str(p))
+        integration_worktree = repo_root / "ringer-100" / "state" / "integration-worktree"
+        (integration_worktree / "engine" / "delete").mkdir(parents=True)
+        (integration_worktree / "engine" / "delete" / "windows_recycle_bin.py").write_text("x\n", encoding="utf-8")
+        (integration_worktree / "engine" / "delete" / "delete_service.py").write_text("x\n", encoding="utf-8")
+
+        score = _base_score(rubric, rubric_path)
+        score["categories"]["data_file_safety"]["score"] = 10
+        score["total"] = 90
+        score["owned_files"] = []
+        score["host_only_finding_ids"] = ["F1"]  # only the host-only one -- F2 is actionable
+        score["findings"] = [
+            {
+                "id": "F1", "severity": "P2", "file": "engine/delete/windows_recycle_bin.py", "line": 42,
+                "summary": "host-only",
+            },
+            {"id": "F2", "severity": "P1", "file": "engine/delete/delete_service.py", "line": 8, "summary": "actionable bug"},
+        ]
+
+        run_calls: list[str] = []
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == sys.executable and len(cmd) > 2 and cmd[2] == "lint":
+                return FakeProc(returncode=0)
+            if cmd[0] == sys.executable and len(cmd) > 2 and cmd[2] == "run":
+                manifest = json.loads(Path(cmd[3]).read_text(encoding="utf-8"))
+                task = manifest["tasks"][0]
+                run_calls.append(task["key"])
+                score_path = Path(manifest["workdir"]) / task["key"] / task["expect_files"][0]
+                score_path.parent.mkdir(parents=True, exist_ok=True)
+                score_path.write_text(json.dumps(score), encoding="utf-8")
+                return FakeProc(returncode=0)
+            raise AssertionError(f"unexpected command (fix phase must never run here): {cmd}")
+
+        state_root = repo_root / "ringer-100" / "state"
+        orchestrator = run_loop.LoopOrchestrator(
+            config=config, rubric=rubric, repo_root=repo_root, ringer_root=Path("/ringer"),
+            state_root=state_root, run=fake_run,
+        )
+        orchestrator.integration_worktree = integration_worktree
+
+        with pytest.raises(run_loop.LoopError, match="does not exactly equal every blocking"):
+            orchestrator._run_round(1, {"score_history": [], "all_owned_files": [], "all_declared_fix_tests": []})
+
+        assert run_calls == ["review-round-01"]
+
+    def test_actionable_round_still_runs_fix_phase_host_gates_and_regrade(self, rubric_copy, monkeypatch):
+        """A purely actionable round (no host_only_finding_ids at all): normal fix behavior is
+        unchanged by the host-only refactor -- the fix phase, host gates, and regrade all still
+        run, and the round still completes.
+
+        See test_host_only_round_skips_fix_phase_but_runs_host_gates_and_regrade above for why
+        integration_worktree is a real Windows tmp_path directory here and only the --add-dir
+        conversion (not wsl_mnt_path_to_windows itself) is monkeypatched."""
+        repo_root, rubric_path = rubric_copy
+        rubric = _rubric_dict(rubric_path)
+        venv_python = self._stub_venv(repo_root)
+        monkeypatch.setattr(run_loop, "wsl_mnt_path_to_windows", lambda p: str(p))
+        config = {
+            "run_name": "photo-curator-100",
+            "worker": {"engine": "claude", "model": "sonnet"},
+            "worker_timeout_s": 1800,
+            "rubric_path": "ringer-100/rubric-v1.json",
+            "host_verification": {
+                "commands": [{"name": "native_suite_passed", "cmd": ["{VENV_PYTHON}", "-m", "pytest"]}]
+            },
+        }
+        integration_worktree = repo_root / "ringer-100" / "state" / "integration-worktree"
+        cited_file = integration_worktree / "engine" / "delete" / "delete_service.py"
+        cited_file.parent.mkdir(parents=True)
+        cited_file.write_text("existing content\n", encoding="utf-8")
+
+        review_score = _base_score(rubric, rubric_path)
+        review_score["categories"]["data_file_safety"]["score"] = 15
+        review_score["total"] = 95
+        review_score["owned_files"] = ["engine/delete/delete_service.py"]
+        review_score["findings"] = [
+            {"id": "F1", "severity": "P1", "file": "engine/delete/delete_service.py", "line": 8, "summary": "actionable bug"}
+        ]
+
+        regrade_score = _base_score(rubric, rubric_path)
+        regrade_score["categories"]["architecture_maintainability"]["score"] = 13
+        regrade_score["total"] = 98
+        regrade_score["owned_files"] = []
+        regrade_score["findings"] = []
+
+        lint_calls: list[str] = []
+        run_calls: list[str] = []
+        host_gate_calls: list[list[str]] = []
+        tree_ids = iter(["pretree001", "posttree002"])
+        fix_patch_text = (
+            "diff --git a/engine/delete/delete_service.py b/engine/delete/delete_service.py\n"
+            "index e69de29..4b825dc 100644\n"
+            "--- a/engine/delete/delete_service.py\n"
+            "+++ b/engine/delete/delete_service.py\n"
+            "@@ -1 +1,2 @@\n"
+            " existing content\n"
+            "+fixed line\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            if cmd[0] == sys.executable and len(cmd) > 2 and cmd[2] == "lint":
+                lint_calls.append(str(cmd[3]))
+                return FakeProc(returncode=0)
+            if cmd[0] == sys.executable and len(cmd) > 2 and cmd[2] == "run":
+                manifest = json.loads(Path(cmd[3]).read_text(encoding="utf-8"))
+                task = manifest["tasks"][0]
+                run_calls.append(task["key"])
+                if task["key"].startswith("fix-round-"):
+                    return FakeProc(returncode=0)  # the fix worker's edit is simulated by the fake git diff below
+                score_path = Path(manifest["workdir"]) / task["key"] / task["expect_files"][0]
+                score_path.parent.mkdir(parents=True, exist_ok=True)
+                if task["key"].startswith("review-round-"):
+                    score_path.write_text(json.dumps(review_score), encoding="utf-8")
+                elif task["key"].startswith("regrade-round-"):
+                    score_path.write_text(json.dumps(regrade_score), encoding="utf-8")
+                else:
+                    raise AssertionError(f"unexpected run task key: {task['key']}")
+                return FakeProc(returncode=0)
+            if cmd[0] == "git":
+                if "read-tree" in cmd or ("add" in cmd and "-A" in cmd):
+                    return FakeProc(returncode=0)
+                if "write-tree" in cmd:
+                    return FakeProc(returncode=0, stdout=next(tree_ids) + "\n")
+                if "diff" in cmd and "--binary" in cmd:
+                    return FakeProc(returncode=0, stdout=fix_patch_text)
+                if "apply" in cmd:
+                    return FakeProc(returncode=0)
+                raise AssertionError(f"unexpected git command: {cmd}")
+            if cmd[0] == str(venv_python):
+                host_gate_calls.append(cmd)
+                return FakeProc(returncode=0)
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        state_root = repo_root / "ringer-100" / "state"
+        orchestrator = run_loop.LoopOrchestrator(
+            config=config, rubric=rubric, repo_root=repo_root, ringer_root=Path("/ringer"),
+            state_root=state_root, run=fake_run,
+        )
+        orchestrator.integration_worktree = integration_worktree
+        state = {"score_history": [], "all_owned_files": [], "all_declared_fix_tests": []}
+        result = orchestrator._run_round(1, state)
+
+        assert result["status"] == "completed"
+        assert result["score_total"] == 98
+        assert result["regrade_ok"] is True
+        assert run_calls == ["review-round-01", "fix-round-01", "regrade-round-01"]
+        assert any("fix-manifest.json" in path for path in lint_calls)
+        assert len(host_gate_calls) == 1
+        assert not (state_root / "round-01" / "fix" / "host-only-round.json").exists()
+        assert (state_root / "round-01" / "fix-manifest.json").is_file()
+        assert (state_root / "round-01" / "fix" / "round-delta.patch").is_file()
+        assert state["all_owned_files"] == ["engine/delete/delete_service.py"]
 
 
 # --------------------------------------------------------------------------

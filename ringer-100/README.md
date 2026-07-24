@@ -90,7 +90,9 @@ checkout mid-loop:
    access to the phase directory itself). The controller reads that exact
    path and copies it into the round's canonical `round-N/review/score.json`,
    then validates it.
-3. **Fix** (only if the review has confirmed P0/P1/P2 findings): before the
+3. **Fix** (only if the review has confirmed P0/P1/P2 findings, and only if
+   at least one of them is *actionable* -- see **Host-only findings** below
+   for the all-host-only case, which skips this step entirely): before the
    fix worker runs, the controller snapshots the integration worktree's exact
    current state as a git tree object (`round-N/fix/round-trees.json`'s
    `pre_tree`) via a round-scoped **alternate index** -- a throwaway
@@ -196,6 +198,72 @@ requires the structured `evidence.json` (with `status == "passed"`) plus
 all three screenshots (`delete-review.png`, `after-delete.png`,
 `after-undo.png`), each nonempty.
 
+## Host-only findings
+
+A confirmed P0/P1/P2 finding is not always fixable by editing code. A finding
+can say, in the reviewer's own words, that it is not a code defect and can
+only be cleared by an existing rubric-required host gate (for example,
+`windows_undo_verified`, the Windows UI undo/redo verifier) -- the original
+contract unconditionally rejected an empty `owned_files` allowlist whenever
+*any* blocking finding existed, which blocked exactly this case before host
+verification ever ran.
+
+The score JSON schema (see `validate_score.py`'s module docstring for the
+full schema) therefore adds one structured field: `host_only_finding_ids`, a
+list of finding `id` strings. `validate_and_load_allowlist` in `run_loop.py`
+-- not `validate_score.py`, which stays immutable and unaware of this field
+-- enforces the contract independently every round:
+
+- Every finding, and in particular every blocking (P0/P1/P2) finding, must
+  carry a stable, non-empty `id` string; a blocking finding without one is
+  rejected outright (the contract cannot be validated without it).
+- `host_only_finding_ids` must be a list of unique, non-empty strings, each
+  naming a finding `id` that actually appears in this round's `findings`.
+  Unknown ids, duplicate ids, and ids naming a non-blocking (P3/info) finding
+  are all rejected.
+- An **empty `owned_files` list is accepted only when `host_only_finding_ids`
+  is a list of unique ids exactly equal to every blocking finding id** this
+  round -- i.e. every confirmed P0/P1/P2 finding, with no exceptions, is
+  host-only. Any other empty-`owned_files` case fails closed exactly as
+  before.
+- If even one blocking finding is *not* host-only, `owned_files` must be
+  non-empty, precisely as the original contract required -- normal fix
+  behavior for actionable findings is unchanged.
+- Host-only status is read **only** from this explicit, structured array --
+  never inferred by searching a finding's free-form `summary` text, which a
+  worker could phrase to talk its way past ownership. The review/regrade
+  worker spec says this explicitly (see `render_worker_prompt`'s
+  `extra_context` in `build_review_manifest` / `build_regrade_manifest`):
+  `host_only_finding_ids` is only for findings resolvable solely by an
+  existing rubric-required host gate, never for documentation, tests, or
+  code work.
+
+When a round's findings are **all** host-only, `_run_round` skips the model
+fix phase and all patch machinery entirely (`build_fix_manifest`,
+`ringer_lint`/`ringer_run` for the fix manifest, `validate_fix_patch`,
+`compute_round_delta`, and rollback bookkeeping) and writes
+`round-N/fix/host-only-round.json` recording the accepted
+`host_only_finding_ids` for audit. It then runs every configured host gate
+directly against the **unchanged** accumulated integration worktree, writes
+`host-gates.json` / `host-evidence.json` exactly as the actionable path does,
+and performs the identical regrade with host authority forced into the score
+-- the same `_verify_and_regrade` helper both round shapes share, so this
+tail can never drift between them. Since nothing changed in the worktree,
+"rollback" on a failed gate or failed regrade is a no-op (there is nothing to
+undo); a completed host-only round still accumulates `owned_files`/
+`declared_fix_tests` (empty, in this case) into `state["all_owned_files"]` /
+`state["all_declared_fix_tests"]` like any other round. A host-only round can
+therefore still reach a validated 100 if and only if every existing host gate
+and `validate_score.py`'s independent re-check pass -- there is no fake
+patch, no empty-patch trick, and no direct score override anywhere in this
+path.
+
+A round with a **mix** of host-only and actionable blocking findings runs the
+normal fix flow unchanged: `owned_files` must be non-empty (covering the
+actionable findings), and `host_only_finding_ids` -- if the review sets it at
+all -- names only the strict subset of blocking ids that are genuinely
+host-only; it never causes the fix phase to be skipped by itself.
+
 ## Manifest feasibility
 
 Materialized review/regrade manifests declare an accessible repo (the
@@ -296,6 +364,15 @@ reusing the same integration worktree:
 wsl -e bash -lc 'cd /mnt/c/Users/Poncho/photo-curator && python3 ringer-100/run_loop.py --resume'
 ```
 
+Recover a persisted `status == "blocked"` run so it can retry (see
+**Recovery and cleanup** below for the full contract -- requires `--resume`,
+requires `status == "blocked"`, and refuses if the next round's directory
+already exists on disk):
+
+```
+wsl -e bash -lc 'cd /mnt/c/Users/Poncho/photo-curator && python3 ringer-100/run_loop.py --resume --recover-blocked'
+```
+
 Override any of the resolved paths explicitly (still inside WSL; use WSL
 `/mnt/...` paths, not Windows `C:\...` paths):
 
@@ -355,6 +432,37 @@ restarting.
   reason, score history, last confirmed deductions, and a safe next action.
   The main checkout is untouched; the integration worktree holds exactly
   the last kept (non-rolled-back) round's state.
+- **Recovering a BLOCKED run (`--resume --recover-blocked`)**: after reading
+  `BLOCKED.md` and fixing whatever caused the block (or deciding the block
+  was transient -- e.g. a flaky host gate), recover it explicitly rather than
+  starting a fresh run:
+
+  ```
+  wsl -e bash -lc 'cd /mnt/c/Users/Poncho/photo-curator && python3 ringer-100/run_loop.py --resume --recover-blocked'
+  ```
+
+  This requires `--resume` (bare `--recover-blocked` without it raises
+  immediately) and requires the persisted `state.json` to have
+  `status == "blocked"` (any other status, including `in_progress` or
+  `success`, is refused). It flips `status` back to `in_progress` with a
+  single atomic write (`save_state`) and touches nothing else in
+  `state.json` -- `next_round`, `rounds`, `score_history`,
+  `integration_worktree`, and `all_owned_files`/`all_declared_fix_tests` are
+  all preserved exactly as persisted, and no on-disk round artifact is
+  deleted, moved, or overwritten. Before flipping the status, it checks
+  whether the round directory `state["next_round"]` would resume into
+  (`round-N/`) already exists on disk -- if a round was mid-flight when a
+  `LoopError` blocked the loop, that directory holds partial artifacts from
+  the failed attempt, and recovery refuses outright: archive or remove
+  `round-N/` manually (e.g. rename it aside) before retrying
+  `--resume --recover-blocked`. This loop never auto-deletes or overwrites a
+  partial round. (A plateau or max-rounds block, by contrast, always blocks
+  *between* rounds, so `round-N/` for the next round won't exist yet and
+  recovery proceeds immediately.) Once recovered, the loop continues exactly
+  as `--resume` normally would. **Ordinary `--resume` on a blocked run, without
+  `--recover-blocked`, remains a no-op** -- it prints
+  `loop already concluded with status='blocked'; nothing to do` and exits 1,
+  same as before this flag existed.
 
 ## Safety
 
