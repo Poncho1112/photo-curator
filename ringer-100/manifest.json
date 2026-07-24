@@ -1,0 +1,46 @@
+{
+  "loop_version": 1,
+  "run_name": "photo-curator-100",
+  "rubric_path": "ringer-100/rubric-v1.json",
+  "rubric_sha256": "2027461280a5c401de7adb769298cab3eb7d70c8e830b4aaf93503e366b9d67e",
+  "state_root": "ringer-100/state",
+  "max_rounds": 10,
+  "plateau_rounds": 2,
+  "worker": {
+    "engine": "claude",
+    "model": "sonnet"
+  },
+  "worker_timeout_s": 1800,
+  "identity": "codex-orchestrator",
+  "host_verification": {
+    "commands": [
+      {
+        "name": "native_suite_passed",
+        "cmd": ["{VENV_PYTHON}", "-m", "pytest", "tests", "-q"]
+      },
+      {
+        "name": "compileall_passed",
+        "cmd": ["{VENV_PYTHON}", "-m", "compileall", "-q", "app", "engine"]
+      },
+      {
+        "name": "diff_check_clean",
+        "cmd": ["git", "diff", "--check"]
+      },
+      {
+        "name": "clean_install_passed",
+        "cmd": ["{VENV_PYTHON}", "-m", "pip", "check"]
+      },
+      {
+        "name": "targeted_tests_passed",
+        "cmd": ["{VENV_PYTHON}", "-m", "pytest", "-q"],
+        "targets_from_review": true
+      },
+      {
+        "name": "windows_undo_verified",
+        "cmd": ["{VENV_PYTHON}", "{VERIFY_WINDOWS_UNDO_SCRIPT}", "--round-dir"],
+        "round_dir_arg": true,
+        "pass_repo_and_state_root": true
+      }
+    ]
+  }
+}
