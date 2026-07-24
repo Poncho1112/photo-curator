@@ -738,6 +738,16 @@ class TestWslToWindowsPathConversion:
         with pytest.raises(run_loop.LoopError, match="cannot convert"):
             run_loop.wsl_mnt_path_to_windows("C:\\Users\\Poncho\\photo-curator")
 
+    def test_converts_nested_round_dir_shaped_path(self):
+        # Mirrors the shape run_host_verification builds for --round-dir/--repo-root/--state-root:
+        # a deep path under the state root, several segments below the drive mount.
+        assert run_loop.wsl_mnt_path_to_windows(
+            "/mnt/c/fake/photo-curator/ringer-100/state/round-03/windows-verify"
+        ) == "C:\\fake\\photo-curator\\ringer-100\\state\\round-03\\windows-verify"
+
+    def test_accepts_a_pathlib_path_not_just_a_string(self):
+        assert run_loop.wsl_mnt_path_to_windows(Path("/mnt/c/fake/photo-curator")) == "C:\\fake\\photo-curator"
+
     def test_add_dir_engine_args_shape(self):
         assert run_loop.add_dir_engine_args("C:\\Users\\Poncho\\photo-curator") == [
             "--add-dir=C:\\Users\\Poncho\\photo-curator"
@@ -1268,30 +1278,16 @@ class TestHostVerification:
         integration_worktree = tmp_path / "worktree"
         state_root = main_repo_root / "ringer-100" / "state"
 
-        runner = SequenceRunner([FakeProc(returncode=0), FakeProc(returncode=0)])
+        config = {"host_verification": {"commands": [{"name": "native_suite_passed", "cmd": ["{VENV_PYTHON}", "-m", "pytest"]}]}}
+        runner = SequenceRunner([FakeProc(returncode=0)])
         gates, evidence, evidence_paths = run_loop.run_host_verification(
-            self._config(), main_repo_root, integration_worktree, 1, state_root, run=runner
+            config, main_repo_root, integration_worktree, 1, state_root, run=runner
         )
-        assert gates == {"native_suite_passed": True, "windows_undo_verified": True}
-        for cmd, kwargs in runner.calls:
-            assert cmd[0] == str(venv_python)
-            assert kwargs["cwd"] == str(integration_worktree)
-
-        windows_undo_cmd = runner.calls[1][0]
-        assert windows_undo_cmd[1] == str((main_repo_root / "ringer-100" / "verify_windows_undo.py").resolve())
-        assert "ringer-100/verify_windows_undo.py" not in windows_undo_cmd
-        assert "--repo-root" in windows_undo_cmd
-        assert windows_undo_cmd[windows_undo_cmd.index("--repo-root") + 1] == str(integration_worktree)
-        assert "--state-root" in windows_undo_cmd
-        assert windows_undo_cmd[windows_undo_cmd.index("--state-root") + 1] == str(state_root)
-
-        expected_verify_dir = state_root / "round-01" / "windows-verify"
-        assert evidence_paths == [
-            str(expected_verify_dir / "evidence.json"),
-            str(expected_verify_dir / "delete-review.png"),
-            str(expected_verify_dir / "after-delete.png"),
-            str(expected_verify_dir / "after-undo.png"),
-        ]
+        assert gates == {"native_suite_passed": True}
+        cmd, kwargs = runner.calls[0]
+        assert cmd[0] == str(venv_python)
+        assert kwargs["cwd"] == str(integration_worktree)
+        assert evidence_paths == []
 
     def test_one_gate_fails(self, tmp_path):
         main_repo_root = tmp_path / "main-repo"
@@ -1346,6 +1342,148 @@ class TestHostVerification:
         with pytest.raises(run_loop.LoopError, match="venv interpreter not found"):
             run_loop.run_host_verification(self._config(), main_repo_root, tmp_path / "worktree", 1, state_root, run=runner)
         assert not runner.calls
+
+
+# --------------------------------------------------------------------------
+# run_loop.py -- defect: host-gate commands executed by the Windows-native venv
+# Python must receive Windows-native arguments, not raw WSL /mnt/<drive>/...
+# paths. WSL interop translates only the executable's own path, never its
+# arguments, so an unconverted argument like "/mnt/c/.../verify_windows_undo.py"
+# is read by Windows as rooted at the current drive ("C:\mnt\c\...") -- exit 2,
+# every round forced to roll back. Deliberately uses realistic /mnt/c paths,
+# not tmp_path: tmp_path is host-native (this suite runs under Windows Python
+# per the repo's verification commands -- see FAKE_WSL_WORKTREE above), while
+# run_host_verification's real inputs are always /mnt/<drive>/... in
+# production (the controller only ever runs under WSL). resolve_windows_venv_python
+# is monkeypatched instead of stubbed on disk: a literal WindowsPath("/mnt/c/...")
+# has no drive, so writing "under" it on this test machine would land for real
+# at C:\mnt\c\... -- the exact corrupted location this defect produces.
+# --------------------------------------------------------------------------
+
+
+class TestHostVerificationWindowsNativeConversion:
+    _FAKE_MAIN_REPO_ROOT = Path("/mnt/c/fake/photo-curator")
+    _FAKE_VENV_PYTHON = _FAKE_MAIN_REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+    _FAKE_STATE_ROOT = _FAKE_MAIN_REPO_ROOT / "ringer-100" / "state"
+    _FAKE_INTEGRATION_WORKTREE = _FAKE_STATE_ROOT / "integration-worktree"
+
+    def _patch_fake_venv(self, monkeypatch):
+        monkeypatch.setattr(run_loop, "resolve_windows_venv_python", lambda main_repo_root: self._FAKE_VENV_PYTHON)
+
+    def _config(self):
+        return {
+            "host_verification": {
+                "commands": [
+                    {"name": "native_suite_passed", "cmd": ["{VENV_PYTHON}", "-m", "pytest"]},
+                    {
+                        "name": "windows_undo_verified",
+                        "cmd": ["{VENV_PYTHON}", "{VERIFY_WINDOWS_UNDO_SCRIPT}", "--round-dir"],
+                        "round_dir_arg": True,
+                        "pass_repo_and_state_root": True,
+                    },
+                ]
+            }
+        }
+
+    def test_converts_script_round_dir_repo_root_and_state_root_to_windows_native(self, monkeypatch):
+        self._patch_fake_venv(monkeypatch)
+        runner = SequenceRunner([FakeProc(returncode=0), FakeProc(returncode=0)])
+        gates, evidence, evidence_paths = run_loop.run_host_verification(
+            self._config(), self._FAKE_MAIN_REPO_ROOT, self._FAKE_INTEGRATION_WORKTREE, 3, self._FAKE_STATE_ROOT,
+            run=runner,
+        )
+        assert gates == {"native_suite_passed": True, "windows_undo_verified": True}
+
+        windows_undo_cmd, _kwargs = runner.calls[1]
+        assert windows_undo_cmd[0] == str(self._FAKE_VENV_PYTHON)  # the interpreter's own path: WSL interop
+        # handles this automatically, so it is deliberately left in WSL form, unconverted.
+
+        # This is the regression assertion: the observed defect handed the raw WSL string
+        # ("/mnt/c/fake/photo-curator/ringer-100/verify_windows_undo.py", etc.) straight through.
+        # A converted, native "C:\..." value proves the fix; the raw form proves its absence.
+        assert windows_undo_cmd[1] == "C:\\fake\\photo-curator\\ringer-100\\verify_windows_undo.py"
+        assert "/mnt/c" not in windows_undo_cmd[1]
+
+        assert windows_undo_cmd[2] == "--round-dir"
+        assert windows_undo_cmd[3] == "C:\\fake\\photo-curator\\ringer-100\\state\\round-03\\windows-verify"
+
+        assert windows_undo_cmd[4] == "--repo-root"
+        assert windows_undo_cmd[5] == "C:\\fake\\photo-curator\\ringer-100\\state\\integration-worktree"
+        assert windows_undo_cmd[6] == "--state-root"
+        assert windows_undo_cmd[7] == "C:\\fake\\photo-curator\\ringer-100\\state"
+        assert len(windows_undo_cmd) == 8
+
+        # Controller-side evidence stays canonical WSL: the WSL controller (never the Windows
+        # process) reads these paths back off disk after the round.
+        expected_verify_dir = self._FAKE_STATE_ROOT / "round-03" / "windows-verify"
+        assert evidence_paths == [
+            str(expected_verify_dir / "evidence.json"),
+            str(expected_verify_dir / "delete-review.png"),
+            str(expected_verify_dir / "after-delete.png"),
+            str(expected_verify_dir / "after-undo.png"),
+        ]
+
+    def test_relative_pytest_targets_and_flags_are_not_mangled(self, monkeypatch):
+        self._patch_fake_venv(monkeypatch)
+        config = {
+            "host_verification": {
+                "commands": [
+                    {"name": "compileall_passed", "cmd": ["{VENV_PYTHON}", "-m", "compileall", "-q", "app", "engine"]},
+                    {
+                        "name": "targeted_tests_passed",
+                        "cmd": ["{VENV_PYTHON}", "-m", "pytest", "-q"],
+                        "targets_from_review": True,
+                    },
+                ]
+            }
+        }
+        runner = SequenceRunner([FakeProc(returncode=0), FakeProc(returncode=0)])
+        gates, _evidence, _paths = run_loop.run_host_verification(
+            config, self._FAKE_MAIN_REPO_ROOT, self._FAKE_INTEGRATION_WORKTREE, 1, self._FAKE_STATE_ROOT,
+            review_score={"targeted_tests": ["tests/test_x.py::test_y"]}, run=runner,
+        )
+        assert gates == {"compileall_passed": True, "targeted_tests_passed": True}
+
+        compileall_cmd, _ = runner.calls[0]
+        assert compileall_cmd[1:] == ["-m", "compileall", "-q", "app", "engine"]
+
+        targeted_cmd, _ = runner.calls[1]
+        assert targeted_cmd[1:] == ["-m", "pytest", "-q", "tests/test_x.py::test_y"]
+
+    def test_git_based_host_gates_keep_working_unconverted(self, monkeypatch):
+        self._patch_fake_venv(monkeypatch)
+        config = {"host_verification": {"commands": [{"name": "diff_check_clean", "cmd": ["git", "diff", "--check"]}]}}
+        runner = SequenceRunner([FakeProc(returncode=0)])
+        gates, _evidence, _paths = run_loop.run_host_verification(
+            config, self._FAKE_MAIN_REPO_ROOT, self._FAKE_INTEGRATION_WORKTREE, 1, self._FAKE_STATE_ROOT, run=runner,
+        )
+        assert gates == {"diff_check_clean": True}
+        cmd, kwargs = runner.calls[0]
+        assert cmd == ["git", "diff", "--check"]
+        assert kwargs["cwd"] == str(self._FAKE_INTEGRATION_WORKTREE)
+
+    def test_fails_closed_when_a_windows_bound_path_is_not_representable(self, monkeypatch):
+        self._patch_fake_venv(monkeypatch)
+        config = {
+            "host_verification": {
+                "commands": [
+                    {
+                        "name": "windows_undo_verified",
+                        "cmd": ["{VENV_PYTHON}", "{VERIFY_WINDOWS_UNDO_SCRIPT}", "--round-dir"],
+                        "round_dir_arg": True,
+                        "pass_repo_and_state_root": True,
+                    },
+                ]
+            }
+        }
+        unrepresentable_state_root = Path("/home/poncho/not-under-mnt")  # not a WSL '/mnt/<drive>/...' path
+        runner = SequenceRunner([FakeProc(returncode=0)])  # must never be reached
+        with pytest.raises(run_loop.LoopError, match="cannot convert"):
+            run_loop.run_host_verification(
+                config, self._FAKE_MAIN_REPO_ROOT, self._FAKE_INTEGRATION_WORKTREE, 1,
+                unrepresentable_state_root, run=runner,
+            )
+        assert not runner.calls  # fails closed before this gate's command ever runs
 
 
 # --------------------------------------------------------------------------

@@ -119,15 +119,21 @@ def require_wsl_host(argv: list[str]) -> None:
 
 
 # --------------------------------------------------------------------------
-# WSL <-> Windows-native path conversion (for Claude --add-dir)
+# WSL <-> Windows-native path conversion (Claude --add-dir, and any absolute
+# WSL path handed to a Windows-native host-gate command)
 # --------------------------------------------------------------------------
 
 _WSL_MNT_RE = re.compile(r"^/mnt/([A-Za-z])(/.*)?$")
 
 
 def wsl_mnt_path_to_windows(path: Path | str) -> str:
-    """Pure converter: a WSL ``/mnt/<drive>/...`` path -> a Windows-native ``<drive>:\\...`` path,
-    for the Claude worker's ``--add-dir`` engine arg.
+    """Pure converter: a WSL ``/mnt/<drive>/...`` path -> a Windows-native ``<drive>:\\...`` path.
+
+    Used both for the Claude worker's ``--add-dir`` engine arg and, in ``run_host_verification``,
+    for every absolute WSL path handed to the Windows-native venv Python -- WSL interop only
+    translates the *executable's* own path, never its arguments, so a raw ``/mnt/c/...`` argument
+    gets misread by Windows as rooted at the current drive (``C:\\mnt\\c\\...``) instead of failing
+    loudly.
 
     Raises ``LoopError`` if ``path`` cannot be represented as a native Windows path (i.e. it is
     not rooted under ``/mnt/<single-drive-letter>``) -- never silently guesses.
@@ -136,7 +142,7 @@ def wsl_mnt_path_to_windows(path: Path | str) -> str:
     match = _WSL_MNT_RE.match(posix)
     if not match:
         raise LoopError(
-            f"cannot convert {str(path)!r} to a Windows-native path for Claude --add-dir "
+            f"cannot convert {str(path)!r} to a Windows-native path "
             "(expected a WSL '/mnt/<drive>/...' path)"
         )
     drive = match.group(1).upper()
@@ -953,14 +959,27 @@ def run_host_verification(
     gitignored .venv) but sets cwd to the integration worktree, so every gate exercises this
     round's actual accumulated fixes. Returns (gate_results, evidence_lines, host_evidence_paths)
     -- the host_evidence_paths are computed here, by the controller, never taken from a worker.
+
+    Every command whose ``cmd[0]`` is the Windows venv Python is a Windows-native process: WSL
+    interop resolves that executable's own path automatically, but never translates its
+    arguments, so every absolute WSL filesystem argument bound for that process (the verifier
+    script, ``--round-dir``, ``--repo-root``, ``--state-root``) is converted here via
+    ``wsl_mnt_path_to_windows`` -- fail closed if one isn't representable. Relative pytest
+    targets/flags are left untouched, and ``host_evidence_paths`` below is built from the
+    original (unconverted) WSL ``state_root``/``windows_round_dir``, since it is read back by the
+    WSL controller, never by the Windows process.
     """
     venv_python = resolve_windows_venv_python(main_repo_root)
     # ringer-100/*.py (this loop's own orchestration tooling) is never assumed to exist inside
     # the integration worktree -- it is only ever tracked/committed in the main checkout, so
-    # every reference to it resolves to an absolute path there, never a worktree-relative one.
+    # every reference to it is built as an absolute path there, never a worktree-relative one.
+    # main_repo_root is already absolute (main() resolves it under WSL before the loop starts),
+    # so a plain join is enough -- an extra .resolve() here would re-run path normalization under
+    # whichever Python happens to be calling this function, which is exactly the kind of
+    # environment-dependent surprise this function must not depend on.
     substitutions = {
         "{VENV_PYTHON}": str(venv_python),
-        "{VERIFY_WINDOWS_UNDO_SCRIPT}": str((main_repo_root / "ringer-100" / "verify_windows_undo.py").resolve()),
+        "{VERIFY_WINDOWS_UNDO_SCRIPT}": str(main_repo_root / "ringer-100" / "verify_windows_undo.py"),
     }
     gate_results: dict[str, bool] = {}
     evidence: list[str] = []
@@ -970,11 +989,29 @@ def run_host_verification(
 
     for entry in config["host_verification"]["commands"]:
         name = entry["name"]
-        cmd = [substitutions.get(part, part) for part in entry["cmd"]]
+        # Only commands invoking the Windows venv Python need their absolute WSL path arguments
+        # translated -- other host gates (e.g. plain `git`) run under WSL and read /mnt/... fine.
+        windows_native = entry["cmd"][:1] == ["{VENV_PYTHON}"]
+
+        cmd = []
+        for part in entry["cmd"]:
+            value = substitutions.get(part, part)
+            if windows_native and part == "{VERIFY_WINDOWS_UNDO_SCRIPT}":
+                value = wsl_mnt_path_to_windows(value)
+            cmd.append(value)
+
         if entry.get("round_dir_arg"):
-            cmd = cmd + [str(windows_round_dir)]
+            round_dir_value = str(windows_round_dir)
+            if windows_native:
+                round_dir_value = wsl_mnt_path_to_windows(round_dir_value)
+            cmd = cmd + [round_dir_value]
         if entry.get("pass_repo_and_state_root"):
-            cmd = cmd + ["--repo-root", str(integration_worktree), "--state-root", str(state_root)]
+            repo_root_value = str(integration_worktree)
+            state_root_value = str(state_root)
+            if windows_native:
+                repo_root_value = wsl_mnt_path_to_windows(repo_root_value)
+                state_root_value = wsl_mnt_path_to_windows(state_root_value)
+            cmd = cmd + ["--repo-root", repo_root_value, "--state-root", state_root_value]
         if entry.get("targets_from_review"):
             if not targeted_tests:
                 gate_results[name] = True

@@ -45,10 +45,16 @@ Host gates are the one place Windows-native tooling is still invoked, but
 always *from inside WSL*: `run_host_verification` resolves the main
 checkout's `.venv\Scripts\python.exe` once (`resolve_windows_venv_python`)
 and calls it via WSL's Windows-interop, using its absolute WSL-visible path
--- never a Windows `C:\...` path in a command executed by WSL `python3`, and
-never a relative path (the integration worktree that most host-verification
-commands run inside never has the gitignored `.venv`; see **Host command
-paths** below).
+-- WSL interop resolves that executable path automatically, so it is never a
+Windows `C:\...` path in a command built by WSL `python3`, and never a
+relative path (the integration worktree that most host-verification commands
+run inside never has the gitignored `.venv`; see **Host command paths**
+below).
+
+WSL interop translates only that executable path, though -- never its
+arguments -- so every absolute WSL path handed *to* that process is
+separately converted to native Windows form; see **Host command paths**
+below for exactly which arguments and how.
 
 ## Files
 
@@ -143,9 +149,12 @@ worktree's path explicitly and grants access to it via a Claude
 `--add-dir` engine arg, computed by a pure WSL-to-Windows path converter
 (`wsl_mnt_path_to_windows`): a WSL `/mnt/<drive>/...` path becomes a
 Windows-native `<drive>:\...` path (Claude's `--add-dir` expects a native
-Windows path even though the worker itself runs inside WSL). Paths that
-cannot be represented this way (i.e. not rooted under `/mnt/<drive>`) are
-rejected outright rather than silently guessed. Note that `--add-dir` grants
+Windows path even though the worker itself runs inside WSL). The same
+converter is what `run_host_verification` uses to make WSL path arguments
+safe for the Windows-native venv Python (see **This machine's host
+environment** above). Paths that cannot be represented this way (i.e. not
+rooted under `/mnt/<drive>`) are rejected outright rather than silently
+guessed. Note that `--add-dir` grants
 access only to the integration worktree, never to the phase directory or
 the main repository -- the worker's write access to its own `score-worker.json`
 comes entirely from the task cwd Ringer itself creates, not from any grant
@@ -228,6 +237,24 @@ root, the isolation boundary its round directory must be confined under).
 These are deliberately decoupled so the isolation boundary never drifts
 into a worktree that a later round's rollback could alter or that a
 completed run's cleanup could remove.
+
+Every one of these paths -- the venv interpreter's *own* path aside -- starts
+life as a WSL `/mnt/<drive>/...` path, because the controller only ever runs
+inside WSL. WSL's Windows-interop launches the venv Python fine from that
+path (it translates the executable's own path automatically), but it never
+translates arguments: an unconverted `/mnt/c/...` argument is read by
+Windows as rooted at the current drive (`C:\mnt\c\...`) rather than failing
+loudly, so `run_host_verification` converts every such argument --
+`verify_windows_undo.py`'s own path, `--round-dir`, `--repo-root`, and
+`--state-root` -- to native `C:\...` form via `wsl_mnt_path_to_windows`
+before the command runs, and fails closed (via that same converter) if a
+required path can't be represented that way. Relative pytest targets and
+CLI flags are left untouched, and this conversion only ever applies to
+commands that actually invoke the venv Python -- a gate like the plain `git
+diff --check` command keeps reading WSL paths directly. The `host_gates` /
+`host_evidence_paths` reported back to the controller stay canonical WSL
+paths throughout, since the WSL controller reads them back off disk itself;
+only the arguments handed to the Windows-native subprocess are converted.
 
 ## Commands
 
