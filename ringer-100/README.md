@@ -198,6 +198,26 @@ requires the structured `evidence.json` (with `status == "passed"`) plus
 all three screenshots (`delete-review.png`, `after-delete.png`,
 `after-undo.png`), each nonempty.
 
+Before host verification has run for a round, neither the review nor the
+regrade worker has an authoritative host result at all. `build_review_manifest`
+and `build_regrade_manifest` therefore tell the worker, in the spec itself
+(never left to worker judgment), to write `null` for every rubric-declared
+host gate it has no direct, currently-existing structured evidence for -- a
+worker's own belief, a prior attempt, or a retry/check-failure message are
+never such evidence and never authorize writing `true` or `false`. This
+closes a round-6 failure mode: `validate_score.py` rejects any score that
+reports a gate as `false` outright, regardless of total, so a review with no
+real host result that wrote `false` anyway triggered a retry whose failure
+text ("host gate ... reports failed (false)") reads as confirmation rather
+than correction, and the worker kept re-asserting `false` instead of
+correcting to `null`. During regrade, the worker is instead told to copy the
+provided host-authoritative hint's exact value one-to-one for every gate it
+names (the hint is only ever built from a round whose host verification has
+already fully passed -- see `_verify_and_regrade`, which returns before ever
+building a regrade manifest if any gate failed) and to write `null` for any
+gate the hint doesn't name -- never to fabricate, infer, or carry a value
+forward from its own prior attempt.
+
 ## Host-only findings
 
 A confirmed P0/P1/P2 finding is not always fixable by editing code. A finding
@@ -525,6 +545,15 @@ restarting.
   actions are recoverable), and `docs_test_count` that matches what
   `validate_score.py` independently recounts in the current repository --
   not a remembered or asserted number.
+- The review and regrade prompts state the exact scope a worker must count
+  for `docs_test_count`, matching `validate_score.py`'s own recount byte for
+  byte: `test_files`/`test_functions` over **both** the repository's
+  top-level `tests/` directory and `ringer-100/tests/` (recursively, every
+  `test_*.py` file; every `def`/`async def` at any nesting level whose name
+  starts with `test_`), and `docs_files` over the top-level `docs/`
+  directory only (recursively, every `*.md` file) -- never just one test
+  directory, which previously undercounted and risked failing
+  `validate_score.py`'s own current-count check at regrade.
 - `discretionary_override` is rejected unconditionally, at any score.
 - This automation stops on a **validated** 100 only: `validate_score.py`,
   not the worker, is the gate -- and the main checkout is touched exactly

@@ -1755,6 +1755,92 @@ class TestManifestMaterialization:
 
 
 # --------------------------------------------------------------------------
+# run_loop.py -- defect 6: a pre-host review/regrade has no authoritative host
+# result and must write null (never a fabricated true/false) for any required
+# host gate it lacks direct structured evidence for; retry/check-failure text
+# never authorizes writing or keeping false. Review and regrade must also
+# share one exact, unambiguous docs_test_count scope matching
+# validate_score.py's own current-count implementation.
+# --------------------------------------------------------------------------
+
+
+class TestHostGateAndCountingContract:
+    """Round 6 regression: a fresh review correctly identified a mixed round (one host-only
+    finding plus actionable findings), but after Ringer's validate_score check reported
+    windows_undo_verified=false, retry feedback caused the read-only worker to persist false
+    instead of correcting to null. A pre-host review has no authoritative host result and must
+    use null for every unknown host gate; false is only legal when the reviewer has direct
+    structured host failure evidence. validate_score.py rejects a reported false outright,
+    regardless of total, so a worker that fabricates false here can never recover on its own."""
+
+    def _config(self):
+        return {
+            "run_name": "photo-curator-100",
+            "worker": {"engine": "claude", "model": "sonnet"},
+            "worker_timeout_s": 1800,
+            "rubric_path": "ringer-100/rubric-v1.json",
+        }
+
+    def test_review_spec_requires_null_host_gates_absent_direct_structured_evidence(self, tmp_path):
+        rubric = _rubric_dict(REAL_RUBRIC_PATH)
+        state_root = tmp_path / "state"
+        review = run_loop.build_review_manifest(self._config(), rubric, 1, state_root, tmp_path, FAKE_WSL_WORKTREE)
+        spec = review["tasks"][0]["spec"]
+        assert "Host gate contract:" in spec
+        assert "write null unless you have direct, currently-existing structured host evidence" in spec
+        assert "never authorize writing true or false" in spec
+        assert "the fix is to write null, not to keep or re-derive false" in spec
+
+    def test_regrade_spec_keeps_host_hint_semantics_and_never_authorizes_false(self, tmp_path):
+        rubric = _rubric_dict(REAL_RUBRIC_PATH)
+        state_root = tmp_path / "state"
+        regrade = run_loop.build_regrade_manifest(
+            self._config(), rubric, 1, state_root, tmp_path, FAKE_WSL_WORKTREE,
+            host_gates_hint={"native_suite_passed": True, "windows_undo_verified": True},
+        )
+        spec = regrade["tasks"][0]["spec"]
+        assert "Host gate contract:" in spec
+        assert "copy its exact true/false value, one-to-one" in spec
+        assert (
+            "the fix is to write null (or the hint's exact value, if it names that gate), never false"
+            in spec
+        )
+        assert "the controller forcibly overwrites this field with the authoritative result" in spec
+
+    def test_review_and_regrade_specs_declare_the_exact_same_counting_scope(self, tmp_path):
+        rubric = _rubric_dict(REAL_RUBRIC_PATH)
+        state_root = tmp_path / "state"
+        review = run_loop.build_review_manifest(self._config(), rubric, 1, state_root, tmp_path, FAKE_WSL_WORKTREE)
+        regrade = run_loop.build_regrade_manifest(self._config(), rubric, 1, state_root, tmp_path, FAKE_WSL_WORKTREE)
+        review_spec = review["tasks"][0]["spec"]
+        regrade_spec = regrade["tasks"][0]["spec"]
+        marker = "Test/doc counting contract:"
+        assert marker in review_spec
+        assert marker in regrade_spec
+        review_contract = review_spec[review_spec.index(marker):]
+        regrade_contract = regrade_spec[regrade_spec.index(marker):]
+        assert review_contract == regrade_contract
+        assert "BOTH the repository's top-level tests/ directory AND its ringer-100/tests/ directory" in review_contract
+        assert (
+            "docs_files is every *.md file found recursively under the repository's top-level "
+            "docs/ directory only" in review_contract
+        )
+
+    def test_counting_contract_matches_validate_scores_actual_scanned_directories(self):
+        """Cross-check the prompt's stated scope against validate_score.py's actual
+        implementation, so this test breaks if either drifts from the other without a
+        deliberate update to both."""
+        import inspect
+
+        tests_source = inspect.getsource(validate_score._count_current_tests)
+        docs_source = inspect.getsource(validate_score._count_current_docs)
+        assert '"tests", "ringer-100/tests"' in tests_source
+        assert 'rglob("test_*.py")' in tests_source
+        assert 'repo_root / "docs"' in docs_source
+        assert 'rglob("*.md")' in docs_source
+
+
+# --------------------------------------------------------------------------
 # run_loop.py -- review/regrade artifact location: Ringer creates a task's
 # real cwd at <manifest workdir>/<task key>, one level below the phase's own
 # workdir. The worker must write (and expect_files must declare) exactly
