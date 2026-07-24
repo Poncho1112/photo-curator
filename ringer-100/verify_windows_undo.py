@@ -31,6 +31,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -100,6 +101,30 @@ def sha256_of(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def wait_until(
+    condition: Callable[[], bool],
+    *,
+    timeout_s: float,
+    poll: Callable[[], None],
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Poll ``condition`` until it is true, or fail closed once ``timeout_s`` elapses per ``clock``.
+
+    ``poll`` runs between checks and is responsible for advancing whatever state ``condition``
+    observes (e.g. pumping the Qt event loop so a queued cross-thread signal/slot can actually
+    run) -- this function itself never sleeps and never touches the condition's subject directly,
+    so a condition that never becomes true (production completion never happens) correctly times
+    out and returns ``False`` instead of hanging or being satisfied by a side channel.
+    """
+    deadline = clock() + timeout_s
+    while True:
+        if condition():
+            return True
+        if clock() >= deadline:
+            return False
+        poll()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -259,13 +284,48 @@ def run(round_dir: Path, *, repo_root: Path = REPO_ROOT, state_root: Path | None
 
     if scan_result["records"] is None:
         return fail("production scan worker did not finish within timeout")
+    emitted_record_count = len(scan_result["records"])
+    evidence["diagnostics"]["emitted_record_count"] = emitted_record_count
+    log(f"Scan worker signaled finished: emitted {emitted_record_count} record(s)")
+
+    # ScanWorker.finished is a cross-thread queued signal with two independent slots connected
+    # to it: MainWindow._scan_finished (connected first, by start_scan) and this verifier's own
+    # on_scan_finished (connected second, above). Qt gives no ordering guarantee that the
+    # production slot -- which calls controller.index_records -- has actually run by the time
+    # this callback observes the same signal; receiving the worker signal is not evidence that
+    # production indexing has happened. Wait for the production scan-completion path's own
+    # observable state instead: MainWindow._scan_finished only clears window.scan_worker back to
+    # None as its last step, after index_records() has returned (or raised and been caught), so
+    # that clearing is a robust proxy for "the production callback has finished."
+    production_scan_complete = wait_until(
+        lambda: window.scan_worker is None,
+        timeout_s=15.0,
+        poll=lambda: QTest.qWait(25),
+    )
+    catalog_record_count = len(controller.records)
+    evidence["diagnostics"]["catalog_record_count"] = catalog_record_count
+    if not production_scan_complete:
+        return fail(
+            "production MainWindow._scan_finished did not complete within timeout after the scan "
+            f"worker emitted {emitted_record_count} record(s) (window.scan_worker is still set; "
+            f"catalog currently holds {catalog_record_count} record(s)); refusing to inspect "
+            "duplicate_groups before production indexing is observably complete"
+        )
     evidence["scan_completed"] = True
-    log(f"Scan worker finished: indexed {len(scan_result['records'])} record(s)")
+    log(
+        f"Production scan-completion path finished: catalog holds {catalog_record_count} "
+        f"record(s) after {emitted_record_count} emitted"
+    )
 
     duplicate_groups = controller.duplicate_groups()
     evidence["duplicates_found"] = bool(duplicate_groups)
+    evidence["diagnostics"]["duplicate_group_count"] = len(duplicate_groups)
     if not duplicate_groups:
-        return fail("scan did not detect the generated duplicate JPEGs as a duplicate group")
+        return fail(
+            "scan did not detect the generated duplicate JPEGs as a duplicate group "
+            f"(emitted={emitted_record_count}, catalog_records={catalog_record_count}, "
+            "duplicate_groups=0)"
+        )
 
     watcher_state: dict[str, list[str]] = {"errors": []}
 

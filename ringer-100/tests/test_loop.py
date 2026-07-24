@@ -2249,3 +2249,92 @@ class TestWindowsVerifierGuards:
 
         with pytest.raises(verify_windows_undo.GuardError, match="must be under"):
             verify_windows_undo.require_isolated_root(round_dir_inside_worktree, allowed_base=main_state_root)
+
+
+# --------------------------------------------------------------------------
+# verify_windows_undo.py -- scan/production-indexing synchronization
+#
+# Regression coverage for the confirmed race: verify_windows_undo.py connects its own
+# on_scan_finished callback to ScanWorker.finished AFTER MainWindow.start_scan has already
+# connected MainWindow._scan_finished to the same signal. Both are cross-thread queued
+# slots on one signal, so Qt gives no ordering guarantee that the production slot (which
+# calls controller.index_records) has run by the time the verifier's callback observes the
+# signal -- worker-signal receipt alone is not evidence that production indexing happened.
+# wait_until() is the generic, injectable synchronization primitive the fix uses to wait on
+# an observable production condition instead; these tests exercise it with fake clocks/polls
+# so they stay deterministic and never sleep or touch a real Qt event loop.
+# --------------------------------------------------------------------------
+
+
+class TestScanCompletionSync:
+    def test_wait_until_returns_true_once_condition_becomes_true(self):
+        state = {"ticks": 0}
+
+        def condition():
+            return state["ticks"] >= 3
+
+        def poll():
+            state["ticks"] += 1
+
+        assert verify_windows_undo.wait_until(condition, timeout_s=10.0, poll=poll)
+        assert state["ticks"] == 3
+
+    def test_wait_until_times_out_and_returns_false_without_hanging(self):
+        clock_state = {"now": 0.0}
+
+        def clock():
+            return clock_state["now"]
+
+        def poll():
+            clock_state["now"] += 1.0  # advances the fake clock; condition is never satisfied
+
+        assert not verify_windows_undo.wait_until(lambda: False, timeout_s=5.0, poll=poll, clock=clock)
+
+    def test_wait_until_never_calls_poll_once_condition_is_already_true(self):
+        calls = []
+        assert verify_windows_undo.wait_until(lambda: True, timeout_s=10.0, poll=lambda: calls.append(1))
+        assert calls == []
+
+    def test_worker_signal_receipt_alone_is_not_sufficient_completion_evidence(self):
+        """Models the confirmed race directly: a fake MainWindow whose ``scan_worker`` stands in
+        for the production scan-completion path's observable state. The worker's finished signal
+        (mirrored here by ``worker_signal_received``) is already true at tick zero -- exactly like
+        the old code, which quit its event loop as soon as it saw that signal -- but the
+        production slot (clearing ``scan_worker``) only completes a few ticks later. Synchronizing
+        on the signal alone would report done immediately; wait_until, keyed on the production
+        condition, must not."""
+        fake_window = type("FakeWindow", (), {"scan_worker": object()})()
+        worker_signal_received = True
+
+        ticks_before_production_done = 4
+        state = {"ticks": 0}
+
+        def poll():
+            state["ticks"] += 1
+            if state["ticks"] >= ticks_before_production_done:
+                fake_window.scan_worker = None  # production _scan_finished has now run to completion
+
+        assert worker_signal_received  # the insufficient signal is already true before any poll
+        assert fake_window.scan_worker is not None  # but production completion is not yet observable
+
+        observed = verify_windows_undo.wait_until(
+            lambda: fake_window.scan_worker is None, timeout_s=10.0, poll=poll
+        )
+        assert observed
+        assert state["ticks"] == ticks_before_production_done  # genuinely waited, not short-circuited
+
+    def test_wait_until_fails_closed_when_production_never_completes(self):
+        """If MainWindow._scan_finished never runs (e.g. the app never processes the event), the
+        condition never becomes true; wait_until must time out and report failure rather than
+        hang, bypass the check, or fabricate completion."""
+        fake_window = type("FakeWindow", (), {"scan_worker": object()})()
+        clock_state = {"now": 0.0}
+
+        observed = verify_windows_undo.wait_until(
+            lambda: fake_window.scan_worker is None,
+            timeout_s=3.0,
+            poll=lambda: clock_state.__setitem__("now", clock_state["now"] + 1.0),
+            clock=lambda: clock_state["now"],
+        )
+        assert not observed
+        assert fake_window.scan_worker is not None  # never mutated by the wait itself -- no bypass
