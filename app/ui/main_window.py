@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt
@@ -126,6 +127,11 @@ class MainWindow(QMainWindow):
         self.rename_action.setEnabled(False)
         self.undo_action = QAction("Undo Last Batch", self)
         self.undo_delete_action = QAction("Undo Delete", self)
+        if os.name != "nt":
+            self.undo_delete_action.setEnabled(False)
+            self.undo_delete_action.setToolTip(
+                "Undo Delete cannot currently restore trashed files on this platform."
+            )
         self.select_all_action = QAction("Select All Visible", self)
         self.clear_selection_action = QAction("Clear Selection", self)
         self.mark_action = QAction("Mark for Rename", self)
@@ -536,7 +542,11 @@ class MainWindow(QMainWindow):
             return
         succeeded = sum(result.renamed for result in results)
         failed = len(results) - succeeded
-        QMessageBox.information(self, "Rename complete", f"Renamed: {succeeded}\nFailed or skipped: {failed}")
+        message = f"Renamed: {succeeded}\nFailed or skipped: {failed}"
+        reasons = dict.fromkeys(result.error for result in results if result.error)
+        if reasons:
+            message += "\n\nReason:\n" + "\n".join(reasons)
+        QMessageBox.information(self, "Rename complete", message)
         self.refresh()
 
     def delete_duplicates_flow(self) -> None:
@@ -599,11 +609,14 @@ class MainWindow(QMainWindow):
             return
         restored = sum(result.undone for result in results)
         not_restored = len(results) - restored
-        QMessageBox.information(
-            self,
-            "Undo delete complete",
-            f"Restored: {restored}\nNot restored: {not_restored}",
-        )
+        message = f"Restored: {restored}\nNot restored: {not_restored}"
+        if not_restored:
+            reasons = dict.fromkeys(
+                result.error for result in results if not result.undone and result.error
+            )
+            if reasons:
+                message += "\n\nReason:\n" + "\n".join(reasons)
+        QMessageBox.information(self, "Undo delete complete", message)
         self.refresh()
 
     def _error(self, title: str, message: str) -> None:

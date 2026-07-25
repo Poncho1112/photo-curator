@@ -384,7 +384,7 @@ class LibraryController:
             else:
                 record.status = f"rename error: {result.error}"
             self.repository.update(record)
-        if any(result.renamed for result in results):
+        if log.exists() and log.read_text(encoding="utf-8").strip():
             self.last_undo_log = log
         self.load_records()
         return results
