@@ -1,5 +1,7 @@
 """Review exact duplicate files before moving copies to the Recycle Bin."""
 
+import os
+
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -54,12 +56,17 @@ class DeleteReviewDialog(QDialog):
                 f"{reclaimable_mb:.1f} MB can be reclaimed."
             )
         )
-        layout.addWidget(
-            QLabel(
+        if os.name == "nt":
+            recoverability_message = (
                 "Files are moved to the Recycle Bin, not permanently deleted, "
                 "and can be restored with Undo Delete."
             )
-        )
+        else:
+            recoverability_message = (
+                "Files are moved to the trash, not permanently deleted, but "
+                "Undo Delete cannot currently restore trashed files on this platform."
+            )
+        layout.addWidget(QLabel(recoverability_message))
         layout.addWidget(self.table)
         layout.addWidget(self.buttons)
 

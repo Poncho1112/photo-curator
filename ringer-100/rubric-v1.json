@@ -1,0 +1,77 @@
+{
+  "rubric_id": "photo-curator-windows-release-readiness",
+  "rubric_version": "v1",
+  "target": "Windows release readiness for Photo Curator",
+  "total_max": 100,
+  "categories": [
+    {
+      "id": "functional_correctness",
+      "name": "Functional correctness",
+      "max": 20,
+      "description": "Scan, duplicate detection, delete, undo, rename, and export behave correctly on Windows for the documented workflows."
+    },
+    {
+      "id": "data_file_safety",
+      "name": "Data and file safety",
+      "max": 20,
+      "description": "No realistic path to irrecoverable data loss; destructive actions are recoverable via the OS trash and Undo Delete, and the catalog stays consistent with disk state."
+    },
+    {
+      "id": "architecture_maintainability",
+      "name": "Architecture and maintainability",
+      "max": 15,
+      "description": "Service boundaries, dependency direction, and error handling remain coherent and are not being eroded by point fixes."
+    },
+    {
+      "id": "test_quality_verification",
+      "name": "Test quality and verification depth",
+      "max": 15,
+      "description": "Automated tests exercise real behavior (not tautologies), and destructive workflows have host-verified evidence, not worker assertions alone."
+    },
+    {
+      "id": "performance_scalability",
+      "name": "Performance and scalability",
+      "max": 10,
+      "description": "Scan and duplicate detection scale acceptably for realistic library sizes without blocking the UI thread."
+    },
+    {
+      "id": "ux_accessibility",
+      "name": "UX and accessibility",
+      "max": 10,
+      "description": "Dialogs, keyboard shortcuts, and status messaging are clear, and destructive actions are confirmed before they happen."
+    },
+    {
+      "id": "packaging_docs_release",
+      "name": "Packaging, documentation, and release readiness",
+      "max": 10,
+      "description": "Declared runtime dependencies, current docs, current test counts, and accurate unsupported-platform messaging for a Windows release."
+    }
+  ],
+  "hard_caps": [
+    {
+      "id": "irrecoverable_data_loss",
+      "cap": 59,
+      "description": "Any realistic path where a user's files are permanently lost (bypassing OS trash / Undo Delete) caps the total score at 59 regardless of other category scores."
+    },
+    {
+      "id": "native_suite_failure",
+      "cap": 69,
+      "description": "If the Windows project venv native test suite does not pass, the total score is capped at 69."
+    },
+    {
+      "id": "unverified_core_destructive_workflow",
+      "cap": 84,
+      "description": "If Delete Duplicates and Undo Delete are not independently host-verified end-to-end through the real UI (not just worker assertion), the total score is capped at 84."
+    }
+  ],
+  "host_gates": [
+    "native_suite_passed",
+    "compileall_passed",
+    "diff_check_clean",
+    "clean_install_passed",
+    "targeted_tests_passed",
+    "windows_undo_verified"
+  ],
+  "windows_platform_rule": "Windows may score 100 only if destructive actions (delete/undo) on macOS and Linux are either disabled outright, or accurately documented and surfaced in the UI as unsupported on those platforms. A score of 100 is not permitted if non-Windows destructive behavior is undefined, silently different, or falsely described as recoverable when it is not.",
+  "review_protocol": "You are a read-only reviewer scoring Photo Curator's Windows release readiness against rubric-v1 (photo-curator-windows-release-readiness). Score each of the 7 categories from 0 to its stated maximum, citing current file:line evidence for every deduction and every full-marks category. List every finding with a severity of P0, P1, P2, P3, or info, each with a concrete file and line number. Apply the rubric's hard caps if their conditions are met, and explain which cap (if any) applies. State plainly whether macOS/Linux destructive actions are disabled or accurately presented as unsupported, and flag it as a P0 finding if they are falsely presented as recoverable or silently diverge from Windows behavior. Do not assert that a destructive workflow (delete/undo) has been verified end-to-end unless you can point to host-generated verification evidence (a structured JSON result and screenshots produced by a real, host-executed UI run) that already exists; a worker-only claim of manual testing is not evidence and must not raise the test_quality_verification score or clear the unverified_core_destructive_workflow cap. Never modify the rubric, the validators, or the tests to make scoring easier. Report counts of test files/functions and documentation files you actually observe in the current repository state, not remembered or assumed counts. Output your findings as the machine-readable score JSON schema documented in ringer-100/README.md, with category scores, a total, findings with file/line/severity, host_gates left as your best current knowledge (the host verification step is authoritative and may override you), docs_test_count, runtime_dependencies_declared, unsupported_platform_messaging_accurate, and discretionary_override always false. You do not have authority to grant a discretionary override; if you believe one is warranted, say so in a finding instead."
+}

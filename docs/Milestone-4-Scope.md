@@ -1,7 +1,7 @@
 # Milestone 4 — Recoverable Trash Destinations for Undo Delete
 
 Date scoped: 2026-07-19
-Status: scoped — not started. Milestone 3 (reviewed duplicate deletion) is merged; this milestone closes its known blocker.
+Status: partially implemented. Milestone 3 (reviewed duplicate deletion) is merged; this milestone closes its known blocker. The Windows provider (item #3: `IFileOperation` via `pywin32` with a `PostDeleteItem`-capturing sink) is implemented in `engine/delete/windows_recycle_bin.py` and is the default Windows trash backend. `pyproject.toml` now declares `send2trash` and a Windows-conditional `pywin32` runtime dependency (part of item #6); the `pyobjc-framework-Cocoa` macOS dependency from item #6 is not yet added, pending the macOS provider. The macOS provider (item #2), Linux provider (item #4), and improved error messaging (item #5) remain not started.
 
 ## Goal
 

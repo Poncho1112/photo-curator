@@ -5,6 +5,7 @@ from app.controllers.library_controller import LibraryController
 from app.paths import AppPaths
 from engine.database.models import PhotoRecord
 from engine.database.repository import PhotoRepository
+from engine.rename.rename_service import RenameResult
 
 
 def make_controller(tmp_path, records=()):
@@ -60,6 +61,51 @@ def test_rename_review_detects_conflict_and_missing_source(tmp_path):
     review = controller.rename_review()
     assert review[0].conflict and not review[0].safe
     assert review[1].missing and not review[1].safe
+    controller.repository.close()
+
+
+def test_rename_selected_double_failure_updates_catalog_without_advertising_empty_undo_batch(tmp_path, monkeypatch):
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(b"photo")
+    target = tmp_path / "renamed.jpg"
+    controller = make_controller(tmp_path, [PhotoRecord(str(source), "a" * 64, 5, proposed_name=target.name)])
+    record_id = controller.records[0].id
+    controller.set_selected_for_rename(record_id, True)
+    previous_undo_log = controller.last_undo_log
+
+    class FakeRenameService:
+        """Simulates a rename whose disk move succeeded but whose undo log
+        write and rollback both failed, leaving no usable log entry."""
+
+        def __init__(self, log_path):
+            self.log_path = log_path
+
+        def rename_selected(self, paths):
+            for path in paths:
+                Path(path).rename(target)
+            return [
+                RenameResult(
+                    source,
+                    target,
+                    True,
+                    "Undo logging failed and rollback failed; file was renamed on disk "
+                    "but no undo entry was recorded.",
+                )
+            ]
+
+    monkeypatch.setattr("app.controllers.library_controller.RenameService", FakeRenameService)
+
+    results = controller.rename_selected()
+
+    assert results[0].renamed
+    assert results[0].error
+    updated = controller.repository.get(record_id)
+    assert updated.path == str(target)
+    assert updated.status == "renamed"
+    assert record_id not in controller.rename_selection
+    # The undo log the fake service never wrote to must not be advertised as
+    # an undoable batch.
+    assert controller.last_undo_log == previous_undo_log
     controller.repository.close()
 
 

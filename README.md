@@ -2,7 +2,7 @@
 
 Photo Curator is a local-first PySide6 desktop application for safely indexing, browsing, searching, renaming, and reviewing exact-duplicate deletion across copied photo collections.
 
-Renames are review-first, no-overwrite, and reversible from a per-batch JSONL log. Exact-duplicate deletion is review-first, survivor-retaining, hash-verified, and moves copies to the OS Recycle Bin; it never permanently erases files. The **Undo Delete** action and `UndoDeleteService` exist and pass tests with an injected trash provider, but production restoration of default `send2trash` Recycle Bin moves is a known blocker until a recoverable destination integration is implemented (see [Deleting exact duplicates](#deleting-exact-duplicates) and [[docs/Architecture#Duplicate deletion|Architecture → Duplicate deletion]]).
+Renames are review-first, no-overwrite, and reversible from a per-batch JSONL log. Exact-duplicate deletion is review-first, survivor-retaining, hash-verified, and moves copies to the OS Recycle Bin/Trash; it never permanently erases files. The **Undo Delete** action and `UndoDeleteService` restore Windows deletions by default, since `DeleteService` routes Windows through a native `IFileOperation` Recycle Bin backend that returns the exact recycled path. On macOS and Linux, the default `send2trash` backend still returns no destination, so production restoration on those platforms remains a known blocker until a recoverable destination integration is implemented there (see [Deleting exact duplicates](#deleting-exact-duplicates) and [[docs/Architecture#Duplicate deletion|Architecture → Duplicate deletion]]).
 
 The project deliberately excludes AI tagging, OCR, face recognition, cloud services, automatic organization, and natural-language search. Near-duplicate and perceptual-hash detection are out of scope; only exact SHA-256 duplicates can be deleted, and deletion never bypasses the Recycle Bin.
 
@@ -55,16 +55,18 @@ Photo Curator never overwrites an existing destination. Failed or missing files 
 1. Scan a copied folder so exact duplicates are grouped by SHA-256.
 2. Choose **Library → Delete Duplicates…** to open the review dialog.
 3. The review lists each group with one survivor marked KEEP and every other copy marked DELETE, plus file sizes and the reclaimable total.
-4. Confirm with **Move N copies to Recycle Bin**. Files are moved to the OS Recycle Bin via `send2trash`, not permanently erased.
+4. Confirm with **Move N copies to Recycle Bin**. Files are moved to the OS Recycle Bin/Trash — via a native `IFileOperation` call on Windows, or `send2trash` elsewhere — not permanently erased.
 5. Before each file is trashed, its SHA-256 is recomputed and compared with the indexed hash. A file that changed since indexing is skipped and reported, never deleted on a stale hash.
 6. Each group is guaranteed at least one survivor at the data level — the controller refuses to produce or accept a review that would delete the last copy of a group, including forged reviews.
 7. Catalog rows for trashed files are marked `status="deleted"` and stay visible for audit; the on-disk file is moved to the Recycle Bin.
 
-### Undo Delete — present, but not yet reversing default Recycle Bin moves
+### Undo Delete — restores on Windows; not yet on macOS/Linux
 
 The **Edit → Undo Delete** action and `engine/delete/undo_delete_service.py` exist and pass tests. Each trashed file is appended to a per-batch JSONL deletion log recording the original path, SHA-256, `trashed_to` destination, and UTC timestamp; `UndoDeleteService.restore_all()` reads that log in reverse, refuses to overwrite existing files, and restores each trashed file to its original path.
 
-However, the default production trash provider is `_send_to_trash` in `engine/delete/delete_service.py`, which calls the installed `send2trash.send2trash()`. That function returns `None`, so the deletion log records `trashed_to: null`. `UndoDeleteService` refuses restoration when `trashed_to` is `None`, so default production Recycle Bin deletions are **not currently reversible** through the in-app Undo Delete action. The green Undo Delete tests (and the user-confirmed M3 copy-folder restore proof) use an injected trash provider that returns a destination path, which the default provider does not. Production restoration of default `send2trash` Recycle Bin moves is a known blocker until a recoverable destination integration is implemented.
+On Windows, the default production trash provider is `_send_to_trash_windows` in `engine/delete/delete_service.py`, which calls `engine/delete/windows_recycle_bin.py`'s `send_to_recycle_bin` — a native `IFileOperation` Recycle Bin move that captures and returns the exact recycled path. That path is written to the deletion log as `trashed_to`, so Windows deletions are restorable through the in-app Undo Delete action.
+
+On macOS and Linux, the default production trash provider is still `_send_to_trash_send2trash`, which calls the installed `send2trash.send2trash()`. That function returns `None`, so the deletion log records `trashed_to: null`, and `UndoDeleteService` refuses restoration when `trashed_to` is `None`. Default production trash moves on macOS/Linux are therefore **not currently reversible** through the in-app Undo Delete action — a known blocker until platform-specific providers (see `docs/Milestone-4-Scope.md`) are implemented for those platforms.
 
 ## Keyboard shortcuts
 
@@ -110,7 +112,7 @@ The directory contains `catalog.sqlite3`, `thumbnails/`, `manifests/`, `undo/`, 
 - One active scan is supported at a time.
 - Rename Undo operates on the latest eligible rename log; Undo Delete operates on the latest deletion log.
 - Deletion moves copies to the OS Recycle Bin and never permanently erases or empties the bin.
-- Default production Recycle Bin deletions are not currently reversible through Undo Delete (see above); only an injected trash provider that returns a destination path has been verified to restore.
+- Default production trash moves on macOS/Linux are not currently reversible through Undo Delete (see above); Windows deletions restore by default, and an injected trash provider that returns a destination path also restores on any platform.
 - Renames stay in the original folder; Photo Curator performs no automatic moves.
 
 See [[docs/Architecture|Architecture]] for component details, [[docs/Milestone-2-Scope|Milestone 2]] and [[docs/Milestone-3-Scope|Milestone 3]] for scope and status, and [[outputs/Photo-Curator-Status-2026-07-19|Status 2026-07-19]] for the current status note.

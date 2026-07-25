@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -50,10 +51,37 @@ class RenameService:
                 results.append(RenameResult(source, target, False, "target already exists; overwrite refused"))
                 continue
             try:
-                self._write_log(source, target)
                 source.rename(target)
             except OSError as exc:
                 results.append(RenameResult(source, target, False, str(exc)))
+                continue
+            try:
+                self._write_log(source, target)
+            except OSError as log_exc:
+                try:
+                    target.rename(source)
+                except OSError as rollback_exc:
+                    results.append(
+                        RenameResult(
+                            source,
+                            target,
+                            True,
+                            (
+                                f"Undo logging failed ({log_exc}) and rollback to restore "
+                                f"the original filename also failed ({rollback_exc}); the "
+                                "file was renamed on disk but no undo entry was recorded."
+                            ),
+                        )
+                    )
+                else:
+                    results.append(
+                        RenameResult(
+                            source,
+                            target,
+                            False,
+                            f"Rename was rolled back because the undo log could not be updated: {log_exc}",
+                        )
+                    )
             else:
                 results.append(RenameResult(source, target, True))
         return results
@@ -61,8 +89,20 @@ class RenameService:
     def _write_log(self, source: Path, target: Path) -> None:
         self.undo_log.parent.mkdir(parents=True, exist_ok=True)
         entry = json.dumps({"source": str(source.resolve()), "target": str(target.resolve())})
-        with self.undo_log.open("a", encoding="utf-8") as log:
-            log.write(entry + "\n")
-            log.flush()
-            os.fsync(log.fileno())
+        prior = self.undo_log.read_bytes() if self.undo_log.exists() else b""
+        new_content = prior + (entry + "\n").encode("utf-8")
+
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self.undo_log.parent, prefix=f".{self.undo_log.name}.", suffix=".tmp"
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as tmp_file:
+                tmp_file.write(new_content)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, self.undo_log)
+        except OSError:
+            tmp_path.unlink(missing_ok=True)
+            raise
 

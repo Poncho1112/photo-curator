@@ -17,7 +17,7 @@ PySide6 MainWindow
   ├─ ScanWorker/QThread ─ scanner + Pillow metadata + SHA-256 + naming
   ├─ ThumbnailWorker/QThread ─ Pillow thumbnail cache
   ├─ Rename review ─ RenameService ─ UndoService
-  └─ Delete review ─ DeleteService (send2trash / injected trash) ─ UndoDeleteService
+  └─ Delete review ─ DeleteService (Windows IFileOperation / send2trash / injected trash) ─ UndoDeleteService
 ```
 
 ## Application layer
@@ -63,16 +63,18 @@ Reviewed duplicate deletion is the only feature that removes files, built around
 
 - `LibraryController.delete_review()` groups exact duplicates by SHA-256, picks one survivor per group via `choose_survivor` (`engine/delete/keep_policy.py`), and refuses to produce a review that does not retain exactly one survivor per group.
 - `LibraryController._validate_delete_review()` re-checks the live catalog before execution and rejects any review whose survivor or targets no longer match the live group, including forged reviews that would delete the last copy.
-- `DeleteService.delete_paths()` (`engine/delete/delete_service.py`) recomputes each file's SHA-256 immediately before trashing and skips any file whose hash differs from the indexed value. The default trash function is `_send_to_trash`, which calls the installed `send2trash.send2trash()`; there is no `os.remove` path.
+- `DeleteService.delete_paths()` (`engine/delete/delete_service.py`) recomputes each file's SHA-256 immediately before trashing and skips any file whose hash differs from the indexed value. The default trash function is platform-selected: `_send_to_trash_windows` (native `IFileOperation` Recycle Bin move, returns the exact recycled path) on Windows, and `_send_to_trash_send2trash` (calls the installed `send2trash.send2trash()`) elsewhere; there is no `os.remove` path.
 - Each trashed file is appended to a per-batch JSONL deletion log recording the original path, SHA-256, `trashed_to` destination, and UTC timestamp. Catalog rows for trashed files are marked `status="deleted"`, not removed, so they stay visible for audit and are excluded from future duplicate grouping.
 - `UndoDeleteService.restore_all()` (`engine/delete/undo_delete_service.py`) reads the latest deletion log in reverse, refuses to overwrite existing files, and restores each trashed file to its original path; unrestorable entries are rewritten to the log.
 - `LibraryController.undo_delete()` flips restored rows back to `status="indexed"` and re-points `last_delete_log` at the next remaining deletion log.
 
-### Known blocker: default `send2trash` is not reversible through Undo Delete
+### Known blocker: default `send2trash` on macOS/Linux is not reversible through Undo Delete
 
-The default production trash provider is `_send_to_trash` in `engine/delete/delete_service.py`, which calls the installed `send2trash.send2trash()`. That function returns `None`, so `DeleteService` writes the deletion-log entry with `trashed_to: null`. `UndoDeleteService.restore_all()` reads `trashed_to` from the log and refuses restoration when it is `None` (it cannot locate the trashed file). Default production Recycle Bin deletions are therefore **not currently reversible** through the in-app Undo Delete action.
+On Windows, the default production trash provider is `_send_to_trash_windows` in `engine/delete/delete_service.py`, which calls `engine/delete/windows_recycle_bin.py`'s `send_to_recycle_bin` — a native `IFileOperation` Recycle Bin move that captures and returns the exact recycled path. `DeleteService` writes that path to the deletion log as `trashed_to`, so `UndoDeleteService.restore_all()` can locate and restore Windows deletions by default.
 
-The green Undo Delete tests (`tests/test_delete_service.py`, `tests/test_delete_controller.py`) and the user-confirmed M3 copy-folder restore proof use an **injected** trash provider that returns a destination path, which the default `send2trash` provider does not. Production restoration of default `send2trash` Recycle Bin moves is a known blocker until a recoverable destination integration is implemented. This blocker does not affect survivor retention, the pre-delete SHA-256 recheck, or the Recycle Bin (non-permanent) deletion guarantee.
+On macOS and Linux, the default production trash provider is still `_send_to_trash_send2trash`, which calls the installed `send2trash.send2trash()`. That function returns `None`, so `DeleteService` writes the deletion-log entry with `trashed_to: null`. `UndoDeleteService.restore_all()` reads `trashed_to` from the log and refuses restoration when it is `None` (it cannot locate the trashed file). Default production trash moves on macOS/Linux are therefore **not currently reversible** through the in-app Undo Delete action.
+
+The green Undo Delete tests (`tests/test_delete_service.py`, `tests/test_delete_controller.py`) and the user-confirmed M3 copy-folder restore proof also use an **injected** trash provider that returns a destination path, exercising the same restorable path that the Windows native backend now provides by default and that the macOS/Linux `send2trash` backend still does not. Production restoration of default `send2trash` moves on macOS/Linux is a known blocker until a recoverable destination integration is implemented for those platforms. This blocker does not affect survivor retention, the pre-delete SHA-256 recheck, or the Recycle Bin/Trash (non-permanent) deletion guarantee.
 
 ## Selection model
 
@@ -91,4 +93,4 @@ The selection-aware context menu targets the entire ordinary selection when the 
 
 ## Tests
 
-Core tests cover naming, SQLite, duplicate hashing, rename, and undo. Milestone tests cover controller loading and filtering, selection persistence, conflict review, manifests, missing records, scan cancellation/error isolation, offscreen preview integration, thumbnail lifecycle (close joins the active thread and filter changes queue a refresh), index batching, incremental re-scan, and reviewed duplicate deletion (keep-policy, last-copy protection, pre-delete hash re-check, trash, undo with an injected provider, and the delete-review UI flow). The native suite is 89 tests; the delete tests inject a trash function that returns a destination path so they exercise the restorable path that the default `send2trash` provider does not.
+Core tests cover naming, SQLite, duplicate hashing, rename, and undo. Milestone tests cover controller loading and filtering, selection persistence, conflict review, manifests, missing records, scan cancellation/error isolation, offscreen preview integration, thumbnail lifecycle (close joins the active thread and filter changes queue a refresh), index batching, incremental re-scan, and reviewed duplicate deletion (keep-policy, last-copy protection, pre-delete hash re-check, trash, undo with an injected provider, and the delete-review UI flow). The native suite is 115 tests; the delete tests inject a trash function that returns a destination path so they exercise the restorable path that the default `send2trash` provider does not.
