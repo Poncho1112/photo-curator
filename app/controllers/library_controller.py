@@ -283,17 +283,22 @@ class LibraryController:
         if service is None:
             log = self.paths.undo_logs / f"delete-{datetime.now():%Y%m%d-%H%M%S-%f}.jsonl"
             service = DeleteService(log)
-        results = service.delete_groups(groups, roots=self.roots)
-        for result in results:
+
+        def record_result(result: TrashResult) -> None:
             if not result.trashed:
-                continue
+                return
             record = self.repository.get_by_path(result.source)
             if record is not None:
                 record.status = "deleted"
                 self.repository.update(record)
-        if any(result.trashed for result in results):
             self.last_delete_log = service.deletion_log
-        self.load_records()
+
+        try:
+            results = service.delete_groups(
+                groups, roots=self.roots, on_result=record_result
+            )
+        finally:
+            self.load_records()
         return results
 
     def _validate_delete_review(self, items: list[DeleteReviewItem]) -> None:

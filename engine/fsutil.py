@@ -3,8 +3,27 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
+
+
+def atomic_write_text(path: str | Path, content: str) -> None:
+    """Durably replace *path* with UTF-8 *content* on the same filesystem."""
+    target = Path(path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            tmp_file.write(content)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, target)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def normalized_absolute(path: str | Path) -> str:

@@ -594,12 +594,20 @@ class MainWindow(QMainWindow):
             return
         trashed = sum(result.trashed for result in results)
         skipped = len(results) - trashed
+        unlogged = sum(result.trashed and not result.undo_logged for result in results)
+        unlogged_message = ""
+        if unlogged:
+            unlogged_message = (
+                f"\n{unlogged} file(s) ARE in the Recycle Bin but cannot be restored "
+                "with Undo Delete."
+            )
         QMessageBox.information(
             self,
             "Duplicate deletion complete",
             f"Moved to Recycle Bin: {trashed}\n"
             f"Skipped: {skipped}\n"
-            "Skipped files were changed since indexing and were not deleted.",
+            "Skipped files were changed since indexing and were not deleted."
+            f"{unlogged_message}",
         )
         self.refresh()
 

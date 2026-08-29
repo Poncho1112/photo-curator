@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
 from engine.duplicates.exact_duplicates import sha256_file
+from engine.fsutil import atomic_write_text
 from engine.metadata.exif_reader import capture_datetime
 
 from .naming import generate_name
@@ -89,20 +88,5 @@ class RenameService:
     def _write_log(self, source: Path, target: Path) -> None:
         self.undo_log.parent.mkdir(parents=True, exist_ok=True)
         entry = json.dumps({"source": str(source.resolve()), "target": str(target.resolve())})
-        prior = self.undo_log.read_bytes() if self.undo_log.exists() else b""
-        new_content = prior + (entry + "\n").encode("utf-8")
-
-        fd, tmp_name = tempfile.mkstemp(
-            dir=self.undo_log.parent, prefix=f".{self.undo_log.name}.", suffix=".tmp"
-        )
-        tmp_path = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "wb") as tmp_file:
-                tmp_file.write(new_content)
-                tmp_file.flush()
-                os.fsync(tmp_file.fileno())
-            os.replace(tmp_path, self.undo_log)
-        except OSError:
-            tmp_path.unlink(missing_ok=True)
-            raise
-
+        prior = self.undo_log.read_text(encoding="utf-8") if self.undo_log.exists() else ""
+        atomic_write_text(self.undo_log, prior + entry + "\n")

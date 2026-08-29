@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine.duplicates.exact_duplicates import sha256_file
+from engine.fsutil import atomic_write_text
 
 LegacyLocator = Callable[[dict[str, object]], Path]
 
@@ -66,7 +67,7 @@ class UndoDeleteService:
 
         remaining.reverse()
         content = "".join(json.dumps(entry) + "\n" for entry in remaining)
-        self.deletion_log.write_text(content, encoding="utf-8")
+        atomic_write_text(self.deletion_log, content)
         return results
 
     def _resolve_current(self, entry: dict[str, object]) -> tuple[Path | None, str | None]:

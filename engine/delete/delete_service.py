@@ -25,6 +25,7 @@ class TrashResult:
     trashed: bool
     trashed_to: Path | None = None
     error: str | None = None
+    undo_logged: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +120,14 @@ class DeleteService:
             destination = self.trash_fn(source)
         except OSError as exc:
             return TrashResult(source, False, error=str(exc))
+        except Exception as exc:
+            return TrashResult(
+                source,
+                False,
+                error=(
+                    f"recycle failed unexpectedly: {exc}; this file's state should be verified"
+                ),
+            )
 
         # Windows production backend must return an exact path; injected backends
         # may still return None (legacy). A Windows default that returns None is
@@ -134,7 +143,18 @@ class DeleteService:
             )
 
         trashed_to = Path(destination).resolve() if destination is not None else None
-        self._write_log(original, expected_sha256, trashed_to, source_size=source_size)
+        try:
+            self._write_log(original, expected_sha256, trashed_to, source_size=source_size)
+        except OSError as exc:
+            return TrashResult(
+                source,
+                True,
+                trashed_to,
+                error=(
+                    f"file is in the Recycle Bin but has no Undo Delete entry: {exc}"
+                ),
+                undo_logged=False,
+            )
         return TrashResult(source, True, trashed_to)
 
     def delete_groups(
@@ -142,6 +162,7 @@ class DeleteService:
         groups: Iterable[DeleteGroup],
         *,
         roots: Iterable[str | Path],
+        on_result: Callable[[TrashResult], None] | None = None,
     ) -> list[TrashResult]:
         """Delete duplicate targets only after group-wide safety checks pass."""
         root_tuple = tuple(roots)
@@ -166,13 +187,18 @@ class DeleteService:
             ):
                 reason = "path is outside every added folder"
             if reason is not None:
-                results.extend(TrashResult(target, False, error=reason) for target in group.targets)
+                for target in group.targets:
+                    result = TrashResult(target, False, error=reason)
+                    results.append(result)
+                    if on_result is not None:
+                        on_result(result)
                 continue
 
             for target in group.targets:
-                results.append(
-                    self._delete_path(target, group.sha256, survivor=group.survivor)
-                )
+                result = self._delete_path(target, group.sha256, survivor=group.survivor)
+                results.append(result)
+                if on_result is not None:
+                    on_result(result)
         return results
 
     def _write_log(

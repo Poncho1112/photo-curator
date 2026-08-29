@@ -14,6 +14,7 @@ from engine.delete.windows_recycle_bin import (
     make_legacy_locator,
     normalize_windows_path,
     parse_i_file,
+    reset_com_state_for_tests,
     r_path_for_i_path,
     send_to_recycle_bin,
 )
@@ -306,6 +307,7 @@ def _fake_com_loader(
 
 
 def test_send_to_recycle_bin_returns_exact_path_from_sink(tmp_path):
+    reset_com_state_for_tests()
     source = tmp_path / "photo.jpg"
     source.write_bytes(b"data")
     loader = _fake_com_loader(recycled_path=r"C:\$Recycle.Bin\S-1\$RXYZ.jpg")
@@ -317,6 +319,28 @@ def test_send_to_recycle_bin_returns_exact_path_from_sink(tmp_path):
     # Recycle / undo flags must be present.
     assert loader.fileop.flags & 0x00080000  # FOFX_RECYCLEONDELETE
     assert loader.fileop.flags & 0x20000000  # FOFX_ADDUNDORECORD
+
+
+def test_com_initialized_once_and_never_uninitialized(tmp_path):
+    reset_com_state_for_tests()
+    counts = {"initialize": 0, "uninitialize": 0}
+    loader = _fake_com_loader()
+    pythoncom = loader()["pythoncom"]
+
+    def initialize():
+        counts["initialize"] += 1
+
+    def uninitialize():
+        counts["uninitialize"] += 1
+
+    pythoncom.CoInitialize = initialize
+    pythoncom.CoUninitialize = uninitialize
+    for name in ("one.jpg", "two.jpg", "three.jpg"):
+        source = tmp_path / name
+        source.write_bytes(b"data")
+        send_to_recycle_bin(source, com_loader=loader)
+
+    assert counts == {"initialize": 1, "uninitialize": 0}
 
 
 def test_send_to_recycle_bin_raises_when_com_missing(tmp_path):
