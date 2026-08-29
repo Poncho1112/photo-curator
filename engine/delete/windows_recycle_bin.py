@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import struct
+import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +45,16 @@ _S_OK = 0
 _E_FAIL = 0x80004005
 
 WINDOWS_TRASH_BACKEND = "windows_ifileoperation"
+
+# Qt may own the GUI thread's COM apartment; uninitializing it here can tear down
+# apartment state still needed by Qt during a deletion batch.
+_com_state = threading.local()
+
+
+def reset_com_state_for_tests() -> None:
+    """Clear this thread's cached COM initialization state for isolated tests."""
+    if hasattr(_com_state, "initialized"):
+        del _com_state.initialized
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,74 +484,79 @@ def send_to_recycle_bin(
     abs_path = str(source.resolve())
     abs_path = _strip_extended_path_prefix(abs_path)
 
-    pythoncom.CoInitialize()
-    try:
-        fileop = pythoncom.CoCreateInstance(
-            shell.CLSID_FileOperation,
-            None,
-            pythoncom.CLSCTX_ALL,
-            shell.IID_IFileOperation,
-        )
-        flags = (
-            _FOF_NOCONFIRMATION
-            | _FOF_NOERRORUI
-            | _FOF_SILENT
-            | _FOFX_EARLYFAILURE
-            | _FOFX_ADDUNDORECORD
-            | _FOFX_RECYCLEONDELETE
-            | _FOF_ALLOWUNDO
-        )
-        # Prefer named shellcon constants when present (Windows 8+ values above).
-        for name, value in (
-            ("FOF_NOCONFIRMATION", _FOF_NOCONFIRMATION),
-            ("FOF_NOERRORUI", _FOF_NOERRORUI),
-            ("FOF_SILENT", _FOF_SILENT),
-            ("FOFX_EARLYFAILURE", _FOFX_EARLYFAILURE),
-            ("FOFX_ADDUNDORECORD", _FOFX_ADDUNDORECORD),
-            ("FOFX_RECYCLEONDELETE", _FOFX_RECYCLEONDELETE),
-            ("FOF_ALLOWUNDO", _FOF_ALLOWUNDO),
-        ):
-            flags |= int(getattr(shellcon, name, value))
-
-        fileop.SetOperationFlags(flags)
-        sink_obj, sink_wrapped = _create_capturing_sink(com)
+    if not getattr(_com_state, "initialized", False):
         try:
-            item = shell.SHCreateItemFromParsingName(abs_path, None, shell.IID_IShellItem)
-            fileop.DeleteItem(item, sink_wrapped)
-            result = fileop.PerformOperations()
-            aborted = bool(fileop.GetAnyOperationsAborted())
-        except pywintypes.com_error as error:  # type: ignore[attr-defined]
-            strerror = getattr(error, "strerror", None) or str(error)
-            hresult = getattr(error, "hresult", None)
-            raise OSError(
-                None,
-                f"IFileOperation recycle failed: {strerror}",
-                abs_path,
-                hresult,
-            ) from error
+            pythoncom.CoInitialize()
+        except Exception:
+            # RPC_E_CHANGED_MODE means another owner already initialized this
+            # thread in a different apartment; let the operation prove usability.
+            pass
+        _com_state.initialized = True
 
-        if aborted:
-            raise OSError(
-                None,
-                "IFileOperation recycle aborted; file was not recycled",
-                abs_path,
-            )
-        if result:
-            raise OSError(
-                None,
-                f"IFileOperation recycle failed with result {result}",
-                abs_path,
-                result if isinstance(result, int) else None,
-            )
+    fileop = pythoncom.CoCreateInstance(
+        shell.CLSID_FileOperation,
+        None,
+        pythoncom.CLSCTX_ALL,
+        shell.IID_IFileOperation,
+    )
+    flags = (
+        _FOF_NOCONFIRMATION
+        | _FOF_NOERRORUI
+        | _FOF_SILENT
+        | _FOFX_EARLYFAILURE
+        | _FOFX_ADDUNDORECORD
+        | _FOFX_RECYCLEONDELETE
+        | _FOF_ALLOWUNDO
+    )
+    # Prefer named shellcon constants when present (Windows 8+ values above).
+    for name, value in (
+        ("FOF_NOCONFIRMATION", _FOF_NOCONFIRMATION),
+        ("FOF_NOERRORUI", _FOF_NOERRORUI),
+        ("FOF_SILENT", _FOF_SILENT),
+        ("FOFX_EARLYFAILURE", _FOFX_EARLYFAILURE),
+        ("FOFX_ADDUNDORECORD", _FOFX_ADDUNDORECORD),
+        ("FOFX_RECYCLEONDELETE", _FOFX_RECYCLEONDELETE),
+        ("FOF_ALLOWUNDO", _FOF_ALLOWUNDO),
+    ):
+        flags |= int(getattr(shellcon, name, value))
 
-        new_path = getattr(sink_obj, "new_item_path", None)
-        if not new_path:
-            raise OSError(
-                None,
-                "IFileOperation did not supply an exact recycled path "
-                "(PostDeleteItem newly-created item missing); cannot log undo destination",
-                abs_path,
-            )
-        return Path(str(new_path))
-    finally:
-        pythoncom.CoUninitialize()
+    fileop.SetOperationFlags(flags)
+    sink_obj, sink_wrapped = _create_capturing_sink(com)
+    try:
+        item = shell.SHCreateItemFromParsingName(abs_path, None, shell.IID_IShellItem)
+        fileop.DeleteItem(item, sink_wrapped)
+        result = fileop.PerformOperations()
+        aborted = bool(fileop.GetAnyOperationsAborted())
+    except pywintypes.com_error as error:  # type: ignore[attr-defined]
+        strerror = getattr(error, "strerror", None) or str(error)
+        hresult = getattr(error, "hresult", None)
+        raise OSError(
+            None,
+            f"IFileOperation recycle failed: {strerror}",
+            abs_path,
+            hresult,
+        ) from error
+
+    if aborted:
+        raise OSError(
+            None,
+            "IFileOperation recycle aborted; file was not recycled",
+            abs_path,
+        )
+    if result:
+        raise OSError(
+            None,
+            f"IFileOperation recycle failed with result {result}",
+            abs_path,
+            result if isinstance(result, int) else None,
+        )
+
+    new_path = getattr(sink_obj, "new_item_path", None)
+    if not new_path:
+        raise OSError(
+            None,
+            "IFileOperation did not supply an exact recycled path "
+            "(PostDeleteItem newly-created item missing); cannot log undo destination",
+            abs_path,
+        )
+    return Path(str(new_path))

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+from engine.fsutil import is_beneath, normalized_absolute
 
 from .models import PhotoRecord
 
@@ -130,10 +131,10 @@ class PhotoRepository:
         return self.update(photo)
 
     def mark_missing_except(self, existing_paths: set[str], roots: list[str]) -> None:
-        normalized_roots = [_normalized_absolute(Path(root).resolve()) for root in roots]
+        normalized_roots = [normalized_absolute(Path(root).resolve()) for root in roots]
         for photo in self.list_all():
-            normalized_path = _normalized_absolute(photo.path)
-            belongs = any(_is_beneath(normalized_path, root) for root in normalized_roots)
+            normalized_path = normalized_absolute(photo.path)
+            belongs = any(is_beneath(normalized_path, root) for root in normalized_roots)
             if belongs and photo.path not in existing_paths and photo.status != "missing":
                 photo.status = "missing"
                 self.update(photo)
@@ -157,14 +158,3 @@ class PhotoRepository:
 
     def __exit__(self, *_: object) -> None:
         self.close()
-
-
-def _normalized_absolute(path: str | Path) -> str:
-    return os.path.normcase(os.path.abspath(os.path.normpath(os.fspath(path))))
-
-
-def _is_beneath(path: str, root: str) -> bool:
-    try:
-        return os.path.commonpath((path, root)) == root
-    except ValueError:
-        return False

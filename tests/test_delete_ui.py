@@ -7,7 +7,7 @@ PySide6 = pytest.importorskip("PySide6", exc_type=ImportError)
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox
 
-from app.controllers.library_controller import DeleteReviewItem, LibraryController
+from app.controllers.library_controller import DeleteReviewItem, DeleteReviewSkip, LibraryController
 from app.paths import AppPaths
 from app.ui.main_window import MainWindow
 from app.views.delete_review import DeleteReviewDialog
@@ -56,6 +56,7 @@ def _review_items(tmp_path):
 
 def test_delete_and_undo_actions_exist_and_are_connected(tmp_path, qt_app, monkeypatch):
     window, controller = _window(tmp_path, [])
+    window.folder_panel.add_folder(str(tmp_path))
     calls = {"review": 0, "question": 0}
 
     def empty_review():
@@ -82,6 +83,7 @@ def test_delete_and_undo_actions_exist_and_are_connected(tmp_path, qt_app, monke
 
 def test_delete_duplicates_flow_executes_review_and_refreshes(tmp_path, qt_app, monkeypatch):
     window, controller = _window(tmp_path, [])
+    window.folder_panel.add_folder(str(tmp_path))
     review = _review_items(tmp_path)
     deleted = []
     summaries = []
@@ -128,6 +130,7 @@ def test_delete_duplicates_flow_executes_review_and_refreshes(tmp_path, qt_app, 
 
 def test_delete_duplicates_flow_with_no_duplicates_only_informs(tmp_path, qt_app, monkeypatch):
     window, controller = _window(tmp_path, [])
+    window.folder_panel.add_folder(str(tmp_path))
     messages = []
 
     monkeypatch.setattr(controller, "delete_review", lambda: [])
@@ -146,6 +149,33 @@ def test_delete_duplicates_flow_with_no_duplicates_only_informs(tmp_path, qt_app
 
     assert len(messages) == 1
     assert "No exact duplicates were found" in messages[0][1]
+
+    window.close()
+    controller.repository.close()
+
+
+def test_delete_review_skip_dialog_counts_each_group_reason(tmp_path, qt_app, monkeypatch):
+    window, controller = _window(tmp_path, [])
+    window.folder_panel.add_folder(str(tmp_path))
+    messages = []
+    controller.last_delete_review_skips = (
+        DeleteReviewSkip("a", "keep copy is missing from disk"),
+        DeleteReviewSkip("b", "path is outside every added folder"),
+        DeleteReviewSkip("c", "path is outside every added folder"),
+    )
+
+    monkeypatch.setattr(controller, "delete_review", lambda: [])
+    monkeypatch.setattr(
+        QMessageBox,
+        "information",
+        lambda parent, title, message: messages.append((title, message)),
+    )
+
+    window.delete_duplicates_flow()
+
+    skip_message = next(message for title, message in messages if title == "Duplicate groups skipped")
+    assert "keep copy is missing from disk: 1 group(s)" in skip_message
+    assert "path is outside every added folder: 2 group(s)" in skip_message
 
     window.close()
     controller.repository.close()

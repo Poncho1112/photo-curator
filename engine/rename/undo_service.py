@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from engine.fsutil import atomic_write_text
+
 
 @dataclass(frozen=True, slots=True)
 class UndoResult:
@@ -44,6 +46,5 @@ class UndoService:
                 results.append(UndoResult(current, restored, True))
         remaining.reverse()
         content = "".join(json.dumps(entry) + "\n" for entry in remaining)
-        self.undo_log.write_text(content, encoding="utf-8")
+        atomic_write_text(self.undo_log, content)
         return results
-

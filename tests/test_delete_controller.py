@@ -15,7 +15,9 @@ def make_controller(tmp_path, records):
     repository = PhotoRepository(tmp_path / "catalog.sqlite3")
     for record in records:
         repository.insert(record)
-    return LibraryController(repository, AppPaths.from_root(tmp_path / "data"))
+    controller = LibraryController(repository, AppPaths.from_root(tmp_path / "data"))
+    controller.set_roots([tmp_path])
+    return controller
 
 
 def fake_trash(tmp_path):
