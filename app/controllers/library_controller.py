@@ -11,7 +11,8 @@ from typing import Iterable
 from app.paths import AppPaths
 from engine.database.models import PhotoRecord
 from engine.database.repository import PhotoRepository
-from engine.delete.delete_service import DeleteService, TrashResult
+from engine.delete.delete_service import DeleteGroup, DeleteService, TrashResult
+from engine.fsutil import is_contained
 from engine.delete.keep_policy import choose_survivor
 from engine.delete.undo_delete_service import UndoDeleteResult, UndoDeleteService
 from engine.rename.rename_service import RenameResult, RenameService
@@ -53,6 +54,12 @@ class DeleteReviewItem:
     reclaimable_bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class DeleteReviewSkip:
+    group_key: str
+    reason: str
+
+
 class LibraryController:
     def __init__(self, repository: PhotoRepository, paths: AppPaths) -> None:
         self.repository = repository
@@ -61,6 +68,8 @@ class LibraryController:
         self.filters = FilterState()
         self.rename_selection: set[int] = set()
         self.records: list[PhotoRecord] = []
+        self.roots: tuple[str, ...] = ()
+        self.last_delete_review_skips: tuple[DeleteReviewSkip, ...] = ()
         self.last_undo_log: Path | None = self._discover_latest_log()
         self.last_delete_log: Path | None = self._discover_latest_delete_log()
         self.load_records()
@@ -139,15 +148,19 @@ class LibraryController:
         *,
         complete_scan: bool = True,
     ) -> list[PhotoRecord]:
+        self.set_roots(roots)
         seen: set[str] = set()
         with self.repository.batch():
             for record in records:
                 seen.add(record.path)
                 self.repository.upsert_by_path(record)
             if complete_scan:
-                self.repository.mark_missing_except(seen, [str(root) for root in roots])
+                self.repository.mark_missing_except(seen, list(self.roots))
             self._assign_duplicate_groups()
         return self.load_records()
+
+    def set_roots(self, roots: Iterable[str | Path]) -> None:
+        self.roots = tuple(str(root) for root in roots)
 
     def _assign_duplicate_groups(self) -> None:
         groups: dict[str, list[PhotoRecord]] = {}
@@ -179,6 +192,8 @@ class LibraryController:
     ) -> list[DeleteReviewItem]:
         overrides = overrides or {}
         review: list[DeleteReviewItem] = []
+        skips: list[DeleteReviewSkip] = []
+        self.last_delete_review_skips = ()
         for group_key, records in self.duplicate_groups():
             if len({record.sha256 for record in records}) != 1:
                 raise ValueError(
@@ -193,6 +208,16 @@ class LibraryController:
                     raise ValueError(f"Invalid survivor override for duplicate group {group_key}")
             else:
                 survivor = choose_survivor(records, policy)
+            if not Path(survivor.path).is_file():
+                skips.append(DeleteReviewSkip(group_key, "keep copy is missing from disk"))
+                self.last_delete_review_skips = tuple(skips)
+                continue
+            if not is_contained(survivor.path, self.roots) or any(
+                not is_contained(record.path, self.roots) for record in records
+            ):
+                skips.append(DeleteReviewSkip(group_key, "path is outside every added folder"))
+                self.last_delete_review_skips = tuple(skips)
+                continue
             to_delete = tuple(record for record in records if record is not survivor)
             if not to_delete or survivor in to_delete or len(to_delete) >= len(records):
                 raise ValueError(f"Delete review would not retain a survivor for group {group_key}")
@@ -204,6 +229,7 @@ class LibraryController:
                     sum(record.size for record in to_delete),
                 )
             )
+        self.last_delete_review_skips = tuple(skips)
         return review
 
     def export_delete_manifest(
@@ -245,16 +271,19 @@ class LibraryController:
     ) -> list[TrashResult]:
         items = list(review)
         self._validate_delete_review(items)
-        targets = [
-            (Path(record.path), record.sha256)
+        groups = [
+            DeleteGroup(
+                Path(item.survivor.path),
+                item.survivor.sha256,
+                tuple(Path(record.path) for record in item.to_delete),
+            )
             for item in items
-            for record in item.to_delete
         ]
 
         if service is None:
             log = self.paths.undo_logs / f"delete-{datetime.now():%Y%m%d-%H%M%S-%f}.jsonl"
             service = DeleteService(log)
-        results = service.delete_paths(targets)
+        results = service.delete_groups(groups, roots=self.roots)
         for result in results:
             if not result.trashed:
                 continue
@@ -269,6 +298,8 @@ class LibraryController:
 
     def _validate_delete_review(self, items: list[DeleteReviewItem]) -> None:
         """Refuse reviews that no longer retain exactly one live group member."""
+        if not self.roots:
+            raise ValueError("no folders are currently added")
         live_groups = {group_key: records for group_key, records in self.duplicate_groups()}
         seen_groups: set[str] = set()
         all_survivor_paths = {Path(item.survivor.path) for item in items}
@@ -296,6 +327,12 @@ class LibraryController:
                 raise ValueError(
                     f"Selected survivor is not a live member of group {item.group_key}"
                 )
+            if not Path(survivor.path).is_file():
+                raise ValueError(f"Keep copy is missing from disk for group {item.group_key}")
+            if not is_contained(survivor.path, self.roots) or any(
+                not is_contained(record.path, self.roots) for record in item.to_delete
+            ):
+                raise ValueError(f"Path is outside every added folder for group {item.group_key}")
 
             expected_target_ids = set(current_by_id) - {survivor.id}
             actual_target_ids = [record.id for record in item.to_delete]

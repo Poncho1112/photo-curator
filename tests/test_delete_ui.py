@@ -56,6 +56,7 @@ def _review_items(tmp_path):
 
 def test_delete_and_undo_actions_exist_and_are_connected(tmp_path, qt_app, monkeypatch):
     window, controller = _window(tmp_path, [])
+    window.folder_panel.add_folder(str(tmp_path))
     calls = {"review": 0, "question": 0}
 
     def empty_review():
@@ -82,6 +83,7 @@ def test_delete_and_undo_actions_exist_and_are_connected(tmp_path, qt_app, monke
 
 def test_delete_duplicates_flow_executes_review_and_refreshes(tmp_path, qt_app, monkeypatch):
     window, controller = _window(tmp_path, [])
+    window.folder_panel.add_folder(str(tmp_path))
     review = _review_items(tmp_path)
     deleted = []
     summaries = []
@@ -128,6 +130,7 @@ def test_delete_duplicates_flow_executes_review_and_refreshes(tmp_path, qt_app, 
 
 def test_delete_duplicates_flow_with_no_duplicates_only_informs(tmp_path, qt_app, monkeypatch):
     window, controller = _window(tmp_path, [])
+    window.folder_panel.add_folder(str(tmp_path))
     messages = []
 
     monkeypatch.setattr(controller, "delete_review", lambda: [])

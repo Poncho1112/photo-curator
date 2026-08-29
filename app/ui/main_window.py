@@ -550,7 +550,31 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def delete_duplicates_flow(self) -> None:
-        review = self.controller.delete_review()
+        roots = self.folder_panel.folder_paths()
+        self.controller.set_roots(roots)
+        if not roots:
+            QMessageBox.information(
+                self,
+                "Folders required",
+                "Delete Duplicates needs the containing folders to be added first.",
+            )
+            return
+        try:
+            review = self.controller.delete_review()
+        except (OSError, ValueError) as exc:
+            log.exception("Duplicate deletion review failed")
+            self._error("Duplicate deletion failed", str(exc))
+            return
+        if self.controller.last_delete_review_skips:
+            reasons = dict.fromkeys(
+                skip.reason for skip in self.controller.last_delete_review_skips
+            )
+            QMessageBox.information(
+                self,
+                "Duplicate groups skipped",
+                f"Skipped groups: {len(self.controller.last_delete_review_skips)}\n\n"
+                "Reason:\n" + "\n".join(reasons),
+            )
         if not review:
             QMessageBox.information(
                 self,
