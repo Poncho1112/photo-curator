@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QThread, QTimer, Qt
@@ -19,6 +21,7 @@ from app.views.rename_review import RenameReviewDialog
 from app.widgets.progress_panel import ProgressPanel
 from app.workers.scan_worker import ScanWorker
 from app.workers.thumbnail_worker import ThumbnailWorker
+from engine.delete.delete_service import TrashResult
 from engine.thumbnails.thumbnail_service import enforce_cache_limit
 
 
@@ -30,6 +33,31 @@ THEME_KEY = "theme"
 THUMBNAIL_SIZE_KEY = "thumbnailSize"
 VALID_THEMES = frozenset({"System", "Light", "Dark"})
 VALID_THUMBNAIL_SIZES = frozenset({"Small", "Medium", "Large"})
+
+
+def format_delete_summary(results: Sequence[TrashResult]) -> str:
+    """Format an honest, complete summary of duplicate deletion results."""
+    trashed = sum(result.trashed for result in results)
+    skipped_results = [result for result in results if not result.trashed]
+    lines = [f"Moved to Recycle Bin: {trashed}", f"Skipped: {len(skipped_results)}"]
+
+    if skipped_results:
+        reasons = Counter(
+            result.error if result.error is not None else "Unknown reason (unrecorded)"
+            for result in skipped_results
+        )
+        lines.extend(["", "Skip reasons:"])
+        lines.extend(f"{reason}: {count} file(s)" for reason, count in reasons.items())
+
+    unlogged = sum(result.trashed and not result.undo_logged for result in results)
+    if unlogged:
+        lines.extend(
+            [
+                "",
+                f"{unlogged} file(s) are in the Recycle Bin but have no Undo Delete entry.",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def create_application_settings(settings_file: str | Path | None = None) -> QSettings:
@@ -566,14 +594,17 @@ class MainWindow(QMainWindow):
             self._error("Duplicate deletion failed", str(exc))
             return
         if self.controller.last_delete_review_skips:
-            reasons = dict.fromkeys(
+            reasons = Counter(
                 skip.reason for skip in self.controller.last_delete_review_skips
             )
             QMessageBox.information(
                 self,
                 "Duplicate groups skipped",
                 f"Skipped groups: {len(self.controller.last_delete_review_skips)}\n\n"
-                "Reason:\n" + "\n".join(reasons),
+                "Reasons:\n"
+                + "\n".join(
+                    f"{reason}: {count} group(s)" for reason, count in reasons.items()
+                ),
             )
         if not review:
             QMessageBox.information(
@@ -592,22 +623,10 @@ class MainWindow(QMainWindow):
             log.exception("Duplicate deletion failed")
             self._error("Duplicate deletion failed", str(exc))
             return
-        trashed = sum(result.trashed for result in results)
-        skipped = len(results) - trashed
-        unlogged = sum(result.trashed and not result.undo_logged for result in results)
-        unlogged_message = ""
-        if unlogged:
-            unlogged_message = (
-                f"\n{unlogged} file(s) ARE in the Recycle Bin but cannot be restored "
-                "with Undo Delete."
-            )
         QMessageBox.information(
             self,
             "Duplicate deletion complete",
-            f"Moved to Recycle Bin: {trashed}\n"
-            f"Skipped: {skipped}\n"
-            "Skipped files were changed since indexing and were not deleted."
-            f"{unlogged_message}",
+            format_delete_summary(results),
         )
         self.refresh()
 
