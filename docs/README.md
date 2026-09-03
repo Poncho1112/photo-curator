@@ -11,4 +11,4 @@ Project notes and documentation live here. Files in this directory use standard 
 
 ## Current status
 
-- [[../outputs/Photo-Curator-Status-2026-07-19|Photo-Curator-Status-2026-07-19]] is the current status note and supersedes [[../outputs/Photo-Curator-Handoff-2026-07-10|Photo-Curator-Handoff-2026-07-10]] for current status. The 2026-07-10 handoff is retained for history and is not rewritten.
+- [[../outputs/Photo-Curator-Status-2026-07-19|Photo-Curator-Status-2026-07-19]] is the current status note. The 2026-07-10 handoff history was moved to private storage and is no longer in this public repository.
